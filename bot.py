@@ -1,5 +1,6 @@
-# bot.py - Dark Point Telegram Bot - Main File
+# bot.py - Dark Point Telegram Bot - Main File (Render Ready)
 
+import os
 import logging
 import time
 import random
@@ -8,7 +9,10 @@ import math
 import asyncio
 import json
 import re
+import threading
 import requests
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -24,14 +28,12 @@ from telegram.constants import ParseMode, ChatAction
 from config import *
 from database import Database
 
-# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Database instance
 db = Database()
 
 # Conversation states
@@ -50,16 +52,16 @@ db = Database()
     CAPTCHA_VERIFY,
 ) = range(19)
 
-# Helper functions
+
+# ============ HELPER FUNCTIONS ============
+
 def format_number(num):
-    """Format number with commas - Persian style"""
     return "{:,}".format(num)
 
 def get_level_title(level):
     return LEVEL_TITLES.get(level, f"سطح {level}")
 
 def get_dp_range(level):
-    """Get dark point earning range for a level"""
     base_min = BASE_MIN_DP + (level - 1) * DP_INCREASE_PER_LEVEL
     base_max = BASE_MAX_DP + (level - 1) * DP_INCREASE_PER_LEVEL
     return base_min, base_max
@@ -85,13 +87,11 @@ def generate_captcha():
     return f"{num1} {op} {num2}", answer
 
 def get_user_display(user):
-    """Get display name for user"""
     if user.username:
         return f"@{user.username}"
     return f"[{user.first_name}](tg://user?id={user.id})"
 
 async def check_force_join(user_id, context):
-    """Check if user has joined all required channels"""
     for channel in FORCE_JOIN_CHANNELS:
         try:
             member = await context.bot.get_chat_member(channel, user_id)
@@ -102,7 +102,6 @@ async def check_force_join(user_id, context):
     return True
 
 async def send_log(context, text, reply_markup=None):
-    """Send log to log channel"""
     try:
         await context.bot.send_message(
             LOG_CHANNEL_ID, text, 
@@ -110,13 +109,61 @@ async def send_log(context, text, reply_markup=None):
             reply_markup=reply_markup
         )
     except Exception as e:
-        logger.error(f"Log error: {e}")# ============ START & MAIN MENU ============
+        logger.error(f"Log error: {e}")
+
+
+# ============ RENDER KEEP-ALIVE SYSTEM ============
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        html = """
+        <html>
+        <head><title>Dark Point Bot</title></head>
+        <body style="background:#000;color:#fff;text-align:center;font-family:Arial;padding:50px;">
+            <h1>🏴 Dark Point Bot</h1>
+            <h2>✅ Bot is Alive and Running!</h2>
+            <p>Server Time: """ + time.strftime('%Y-%m-%d %H:%M:%S') + """</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode("utf-8"))
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logger.info(f"🌐 Health Check Server running on port {port}")
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+    except Exception as e:
+        logger.error(f"Health server error: {e}")
+
+async def send_self_ping(context: ContextTypes.DEFAULT_TYPE):
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        logger.info("RENDER_EXTERNAL_URL not set. Skipping self-ping.")
+        return
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 DarkPointBot'}
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            if response.status == 200:
+                logger.info("🟢 Self-ping successful! Bot kept alive.")
+    except Exception as e:
+        logger.error(f"🔴 Self-ping failed: {e}")# ============ START & MAIN MENU ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
 
-    # Create user if not exists
     existing = db.get_user(user.id)
     if not existing:
         referrer_id = 0
@@ -130,7 +177,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         db.create_user(user.id, user.username or "", user.first_name or "", referrer_id)
 
-        # Handle referral with captcha
         if referrer_id > 0:
             context.user_data['pending_referrer'] = referrer_id
             captcha_q, captcha_a = generate_captcha()
@@ -145,7 +191,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return CAPTCHA_VERIFY
 
-    # Check for check codes
     if args and args[0].startswith("check_"):
         code = args[0].replace("check_", "")
         amount = db.claim_check(code, user.id)
@@ -157,7 +202,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ به موجودی شما اضافه شد!",
                 parse_mode=ParseMode.MARKDOWN
             )
-            # Notify admin
             for admin_id in ADMIN_IDS:
                 try:
                     await context.bot.send_message(
@@ -198,7 +242,6 @@ async def captcha_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CAPTCHA_VERIFY
 
-    # Check force join
     joined = await check_force_join(user.id, context)
     if not joined:
         channels_text = "\n".join([f"🔗 {ch}" for ch in FORCE_JOIN_CHANNELS])
@@ -211,7 +254,6 @@ async def captcha_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # Process referral
     if referrer_id > 0:
         db.add_referral(referrer_id)
         db.add_dark_points(referrer_id, REFERRAL_REWARD)
@@ -274,6 +316,8 @@ async def show_main_menu(update, context, query=None):
     level = db_user['level']
     title = get_level_title(level)
 
+    bot_username = (await context.bot.get_me()).username
+
     keyboard = [
         [InlineKeyboardButton("⭐ برداشت استارز ⭐", callback_data="stars_withdraw")],
         [
@@ -292,7 +336,7 @@ async def show_main_menu(update, context, query=None):
             InlineKeyboardButton("📡 سلف", callback_data="self_menu"),
             InlineKeyboardButton("❤️ چالش لایکی", callback_data="like_challenge"),
         ],
-        [InlineKeyboardButton("➕ افزودن به گروه", url=f"https://t.me/{(await context.bot.get_me()).username}?startgroup=true")],
+        [InlineKeyboardButton("➕ افزودن به گروه", url=f"https://t.me/{bot_username}?startgroup=true")],
     ]
 
     text = (
@@ -314,7 +358,10 @@ async def show_main_menu(update, context, query=None):
             await update.message.reply_sticker(STICKERS.get('welcome', ''))
         except:
             pass
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))# ============ DARK POINT MENU ============
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+# ============ DARK POINT MENU ============
 
 async def dark_point_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -352,8 +399,6 @@ async def dark_point_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
-
-# ============ INFO PAGES (7 pages) ============
 
 INFO_PAGES = {
     1: (
@@ -481,7 +526,6 @@ async def dp_info_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))# ============ GROUP HANDLERS ============
 
 async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """When bot is added to group"""
     chat = update.effective_chat
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
@@ -512,7 +556,6 @@ async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all group messages"""
     if not update.message or not update.message.text:
         return
 
@@ -523,34 +566,28 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if chat.type not in ['group', 'supergroup']:
         return
 
-    # Ensure user exists
     if not db.get_user(user.id):
         db.create_user(user.id, user.username or "", user.first_name or "")
 
-    # Factory maintenance check
     u = db.get_user(user.id)
     if u and u['factory_active']:
         db.factory_maintenance_due(user.id)
     if u and u['self_active']:
         db.self_maintenance_due(user.id)
 
-    # ===== DARK / DARK CONFIG =====
     if text in ['دارک', 'دارک کانفیگ']:
         await handle_dark_claim(update, context)
         return
 
-    # ===== MOJUDI =====
     if text == 'موجودی':
         await handle_balance_check(update, context)
         return
 
-    # ===== PROFILE =====
     if text == 'پروفایل دارکی':
         await handle_dark_profile(update, context)
         return
 
-    # ===== GAME =====
-    if text.startswith('بازی ') or text.startswith('بازی'):
+    if text.startswith('بازی'):
         parts = text.split()
         if len(parts) >= 2:
             try:
@@ -560,36 +597,30 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 pass
         return
 
-    # ===== TRANSFER =====
     if text.startswith('انتقال '):
         await handle_transfer(update, context)
         return
 
-    # ===== BANK =====
     if text == 'بانک دارکی':
         await handle_bank(update, context)
         return
 
-    # ===== FACTORY =====
     if text == 'کارخونه دارکی':
         await handle_factory(update, context)
         return
 
-    # ===== LEADERBOARD in group =====
     if text == 'لیدربورد':
         await handle_leaderboard_group(update, context)
         return
 
 
 async def handle_dark_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle 'دارک' or 'دارک کانفیگ' in group"""
     user = update.effective_user
     u = db.get_user(user.id)
     if not u:
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
 
-    # Check cooldown
     remaining = db.get_cooldown_remaining(user.id)
     if remaining > 0:
         mins = int(remaining // 60)
@@ -610,7 +641,6 @@ async def handle_dark_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.add_dark_points(user.id, earned)
     db.set_claim(user.id, cooldown)
 
-    # Check level up
     new_level, reward = db.check_and_update_level(user.id)
 
     cd_mins = cooldown // 60
@@ -677,7 +707,6 @@ async def handle_dark_profile(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     factory_info = ""
     if u['factory_active']:
-        from config import FACTORY_LEVELS
         f_level = u['factory_level']
         mine_rate = FACTORY_LEVELS[f_level]['mine_per_min']
         factory_info = f"\n🏭 کارخونه سطح {f_level} | دقیقه‌ای {mine_rate} DP"
@@ -686,8 +715,12 @@ async def handle_dark_profile(update: Update, context: ContextTypes.DEFAULT_TYPE
     if u['bank_account']:
         bank_info = f"\n🏦 حساب بانکی: `{u['bank_card']}`\n💰 موجودی بانک: `{format_number(u['bank_balance'])}` DP"
 
-    stars_can = balance // int(db.get_setting('stars_price', '1000000'))
-    stars_text = f"\n⭐ قابل برداشت: {stars_can * 50} استارز" if stars_can > 0 else f"\n⭐ تا برداشت استارز: `{format_number(int(db.get_setting('stars_price', '1000000')) - balance)}` DP نیاز"
+    stars_price = int(db.get_setting('stars_price', '1000000'))
+    stars_can = balance // stars_price
+    if stars_can > 0:
+        stars_text = f"\n⭐ قابل برداشت: {stars_can * 50} استارز"
+    else:
+        stars_text = f"\n⭐ تا برداشت استارز: `{format_number(stars_price - balance)}` DP نیاز"
 
     try:
         await update.message.reply_sticker(STICKERS.get('profile', ''))
@@ -743,7 +776,6 @@ async def handle_create_game(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
-    # Reserve the amount
     db.remove_dark_points(user.id, amount)
 
     try:
@@ -756,18 +788,16 @@ async def handle_create_game(update: Update, context: ContextTypes.DEFAULT_TYPE,
         f"👤 سازنده: {get_user_display(user)}\n"
         f"💰 مبلغ ورود: `{format_number(amount)}` DP\n"
         f"🏆 جایزه برنده: `{format_number(amount * 2)}` DP\n\n"
-        f"⏳ منتظر حریف...\n"
-        f"_یک نفر دیگر می‌تواند شرکت کند_",
+        f"⏳ منتظر حریف...",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎮 پیوستن به بازی", callback_data=f"join_game_PLACEHOLDER")],
-            [InlineKeyboardButton("❌ لغو بازی", callback_data=f"cancel_game_PLACEHOLDER")],
+            [InlineKeyboardButton("🎮 پیوستن به بازی", callback_data="join_game_0")],
+            [InlineKeyboardButton("❌ لغو بازی", callback_data="cancel_game_0")],
         ])
     )
 
     game_id = db.create_game(user.id, amount, chat.id, msg.message_id)
 
-    # Update with correct game_id
     await msg.edit_reply_markup(InlineKeyboardMarkup([
         [InlineKeyboardButton("🎮 پیوستن به بازی", callback_data=f"join_game_{game_id}")],
         [InlineKeyboardButton("❌ لغو بازی", callback_data=f"cancel_game_{game_id}")],
@@ -798,13 +828,10 @@ async def join_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer(f"❌ موجودی ناکافی! نیاز: {format_number(amount)} DP", show_alert=True)
         return
 
-    # Reserve joiner's amount
     db.remove_dark_points(user.id, amount)
     db.join_game(game_id, user.id)
 
     await query.answer("🎮 در حال مشخص کردن برنده...")
-
-    # Determine winner randomly
     await asyncio.sleep(2)
 
     players = [game['creator_id'], user.id]
@@ -815,7 +842,6 @@ async def join_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     db.add_dark_points(winner_id, prize)
     db.finish_game(game_id, winner_id, loser_id)
 
-    # Get display info
     try:
         winner_info = await context.bot.get_chat(winner_id)
         winner_display = f"@{winner_info.username}" if winner_info.username else f"`{winner_id}`"
@@ -863,23 +889,18 @@ async def cancel_game_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("❌ بازی قبلاً شروع شده!", show_alert=True)
         return
 
-    # Refund
     db.add_dark_points(game['creator_id'], game['amount'])
     db.cancel_game(game_id)
 
     await query.edit_message_text(
         f"❌ *بازی لغو شد*\n\n💰 مبلغ `{format_number(game['amount'])}` DP بازگردانده شد.",
         parse_mode=ParseMode.MARKDOWN
-    )
-
-
-# ============ TRANSFER ============
+    )# ============ TRANSFER ============
 
 async def handle_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip()
 
-    # Method 1: Reply + "انتقال amount"
     if update.message.reply_to_message:
         parts = text.split()
         if len(parts) >= 2:
@@ -941,7 +962,6 @@ async def handle_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             return
 
-    # Method 2: "انتقال amount به user_id"
     match = re.match(r'انتقال\s+(\d+)\s+به\s+(\d+)', text)
     if match:
         amount = int(match.group(1))
@@ -994,7 +1014,10 @@ async def handle_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN
             )
         except:
-            pass# ============ BANK ============
+            pass
+
+
+# ============ BANK ============
 
 async def handle_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1020,7 +1043,6 @@ async def handle_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(kb)
         )
     else:
-        # Check interest
         elapsed = time.time() - u['bank_deposit_time'] if u['bank_deposit_time'] > 0 else 0
         interest_ready = elapsed >= 86400 and u['bank_balance'] > 0 and not u['bank_interest_collected']
         potential_interest = int(u['bank_balance'] * 0.10) if interest_ready else 0
@@ -1112,7 +1134,8 @@ async def bank_custom_card_callback(update: Update, context: ContextTypes.DEFAUL
     await query.edit_message_text(
         "✏️ *شماره کارت دلخواه*\n\n"
         "یک شماره 13 رقمی تشکیل شده از اعداد انگلیسی بفرستید\n"
-        "⚠️ نباید قبلاً ثبت شده باشد",
+        "⚠️ نباید قبلاً ثبت شده باشد\n\n"
+        "_به پیوی ربات بفرستید_",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1126,7 +1149,7 @@ async def bank_deposit_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         f"💰 *واریز به بانک دارکی*\n\n"
         f"💎 موجودی فعلی: `{format_number(balance)}` DP\n\n"
-        f"مبلغ مورد نظر برای واریز را بفرستید:",
+        f"مبلغ مورد نظر برای واریز را به پیوی ربات بفرستید:",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1171,7 +1194,6 @@ async def handle_factory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if not u['factory_active'] and u['factory_level'] == 0:
-        # No factory
         kb = [[InlineKeyboardButton(f"🏭 افتتاح کارخونه ({format_number(FACTORY_OPEN_COST)} DP)", callback_data="factory_open")]]
         await update.message.reply_text(
             f"🏭 *کارخونه دارکی*\n\n"
@@ -1189,11 +1211,10 @@ async def handle_factory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Collect mined DP
     mined = db.collect_factory(user.id)
     maintenance = db.factory_maintenance_due(user.id)
 
-    u = db.get_user(user.id)  # Refresh
+    u = db.get_user(user.id)
     f_level = u['factory_level']
     mine_rate = FACTORY_LEVELS[f_level]['mine_per_min']
 
@@ -1262,7 +1283,6 @@ async def factory_upgrade_callback(update: Update, context: ContextTypes.DEFAULT
         await query.answer(f"❌ موجودی ناکافی! نیاز: {format_number(upgrade_cost)} DP", show_alert=True)
         return
 
-    # Collect before upgrade
     db.collect_factory(user.id)
     db.remove_dark_points(user.id, upgrade_cost)
     db.upgrade_factory(user.id)
@@ -1376,7 +1396,6 @@ async def stars_self_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode=ParseMode.MARKDOWN
     )
 
-    # Log
     user_display = f"@{user.username}" if user.username else f"`{user.id}`"
     bot_username = (await context.bot.get_me()).username
     log_kb = [[InlineKeyboardButton("🤖 ورود به ربات", url=f"https://t.me/{bot_username}")]]
@@ -1411,7 +1430,7 @@ async def stars_other_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await query.edit_message_text(
         "👥 *اکانت دیگه*\n\n"
-        "آیدی اکانتی که می‌خواهید استارز براش واریز بشه رو بفرستید:\n\n"
+        "آیدی اکانتی که می‌خواهید استارز براش واریز بشه رو به پیوی ربات بفرستید:\n\n"
         "_مثال: @username یا شماره عددی_",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -1433,8 +1452,6 @@ async def free_gift_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balance = db.get_balance(user.id)
     can_buy = balance >= gift_price
 
-    # Get custom gift plans
-    custom_panels = []
     conn = db.get_conn()
     c = conn.cursor()
     c.execute("SELECT * FROM settings WHERE key LIKE 'gift_plan_%_name'")
@@ -1459,7 +1476,6 @@ async def free_gift_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         needed = gift_price - balance
         text += f"\n📈 `{format_number(needed)}` DP دیگر نیاز دارید\n"
 
-    # Add custom gift plans
     for plan in plans:
         plan_num = plan['key'].split('_')[2]
         name = plan['value']
@@ -1632,10 +1648,7 @@ async def handle_leaderboard_group(update: Update, context: ContextTypes.DEFAULT
         text += f"{medal} {name} - `{format_number(row['dark_points'])}` DP\n"
 
     kb = [[InlineKeyboardButton("🏴 ربات دارک پوینت", url=f"https://t.me/{(await context.bot.get_me()).username}")]]
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))
-
-
-# ============ REFERRAL ============
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))# ============ REFERRAL ============
 
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1777,7 +1790,6 @@ async def buy_panel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Default panels
     buttons = [
         [InlineKeyboardButton(f"🛒 سنایی 500GB ({format_number(DEFAULT_PANEL_PRICES['snai_500gb'])} DP)",
                               callback_data="panel_buy_snai_500gb")],
@@ -1787,7 +1799,6 @@ async def buy_panel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               callback_data="panel_buy_snai_1tb")],
     ]
 
-    # Custom panels
     custom = db.get_custom_panels()
     for panel in custom:
         buttons.append([InlineKeyboardButton(
@@ -1847,7 +1858,6 @@ async def panel_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("❌ موجودی ناکافی!", show_alert=True)
         return
 
-    # Create config via panel API
     config_data = ""
     try:
         config_data = create_panel_config(plan_key, user.id)
@@ -1879,9 +1889,7 @@ async def panel_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def create_panel_config(plan_key, user_id):
-    """Create VPN config via panel API"""
     try:
-        # Determine data limit
         if 'snai_500gb' in plan_key:
             data_gb = 500
         elif 'snai_800gb' in plan_key:
@@ -1897,9 +1905,7 @@ def create_panel_config(plan_key, user_id):
         expire_time = int((time.time() + expire_days * 86400) * 1000)
 
         api_url = f"{PANEL_URL}/panel/api/inbounds/addClient"
-        headers = {
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
 
         client_data = {
             "id": PANEL_INBOUND_ID,
@@ -1916,12 +1922,11 @@ def create_panel_config(plan_key, user_id):
             })
         }
 
-        # Login first
         login_url = f"{PANEL_URL}/panel/api/login"
         session = requests.Session()
-        session.post(login_url, data={"username": "admin", "password": "admin"})
+        session.post(login_url, data={"username": "admin", "password": "admin"}, timeout=10)
 
-        resp = session.post(api_url, json=client_data, headers=headers)
+        resp = session.post(api_url, json=client_data, headers=headers, timeout=10)
         if resp.status_code == 200:
             return f"کانفیگ {email} ساخته شد - {data_gb}GB"
         else:
@@ -1948,9 +1953,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🎁 گیفت: روشن/خاموش", callback_data="admin_toggle_gift"),
             InlineKeyboardButton("⭐ استارز: روشن/خاموش", callback_data="admin_toggle_stars"),
         ],
-        [
-            InlineKeyboardButton("💰 خرید DP: روشن/خاموش", callback_data="admin_toggle_buydp"),
-        ],
+        [InlineKeyboardButton("💰 خرید DP: روشن/خاموش", callback_data="admin_toggle_buydp")],
         [InlineKeyboardButton("📝 ساخت چک شخصی", callback_data="admin_create_check")],
         [InlineKeyboardButton("🎁 افزودن پلن گیفت", callback_data="admin_add_gift_plan")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
@@ -1972,7 +1975,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))
 
 
-# Admin: Add DP to user
 async def admin_add_dp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.from_user.id not in ADMIN_IDS:
@@ -2130,7 +2132,6 @@ async def admin_add_dp_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 price = int(update.message.text.strip())
                 name = context.user_data['gift_plan_name']
-                # Find next plan number
                 conn = db.get_conn()
                 c = conn.cursor()
                 c.execute("SELECT COUNT(*) as cnt FROM settings WHERE key LIKE 'gift_plan_%_name'")
@@ -2152,7 +2153,6 @@ async def admin_add_dp_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.pop('gift_plan_name', None)
 
 
-# Admin callbacks
 async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
@@ -2212,22 +2212,19 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         context.user_data['admin_action'] = 'add_gift_plan'
         context.user_data['gift_plan_step'] = 'name'
-        await query.edit_message_text("🎁 *افزودن پلن گیفت*\n\nنام پلن:", parse_mode=ParseMode.MARKDOWN)# ============ PRIVATE MESSAGE HANDLERS ============
+        await query.edit_message_text("🎁 *افزودن پلن گیفت*\n\nنام پلن:", parse_mode=ParseMode.MARKDOWN)# ============ PRIVATE MESSAGE HANDLER ============
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle private messages for various inputs"""
     user = update.effective_user
     text = update.message.text.strip() if update.message.text else ""
 
     if not text:
         return
 
-    # Admin actions
     if user.id in ADMIN_IDS and 'admin_action' in context.user_data:
         await admin_add_dp_handler(update, context)
         return
 
-    # Bank custom card
     if context.user_data.get('awaiting_bank_card'):
         if len(text) != 13 or not text.isdigit():
             await update.message.reply_text("❌ شماره کارت باید 13 رقم و فقط اعداد انگلیسی باشد!")
@@ -2253,7 +2250,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    # Bank deposit
     if context.user_data.get('awaiting_bank_deposit'):
         try:
             amount = int(text)
@@ -2276,7 +2272,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ فقط عدد بفرستید!")
         return
 
-    # Stars other account
     if context.user_data.get('awaiting_stars_target'):
         target = text.strip().replace("@", "")
         stars_price = int(db.get_setting('stars_price', '1000000'))
@@ -2326,25 +2321,16 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
 
-    # Main menu
     if data == "main_menu":
         await show_main_menu(update, context, query=query)
-
-    # Dark point menu
     elif data == "dark_point_menu":
         await dark_point_menu(update, context)
-
-    # Info pages
     elif data.startswith("dp_info_"):
         await dp_info_page(update, context)
-
-    # Referral
     elif data == "referral_menu":
         await referral_menu(update, context)
     elif data == "get_ref_link":
         await referral_menu(update, context)
-
-    # Stars
     elif data == "stars_withdraw":
         await stars_withdraw_menu(update, context)
     elif data == "stars_do_withdraw":
@@ -2353,50 +2339,34 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stars_self_callback(update, context)
     elif data == "stars_other":
         await stars_other_callback(update, context)
-
-    # Gift
     elif data == "free_gift":
         await free_gift_menu(update, context)
     elif data == "order_gift_teddy":
         await order_gift_teddy(update, context)
     elif data.startswith("order_gift_custom_"):
         await order_gift_custom(update, context)
-
-    # Buy DP
     elif data == "buy_dp":
         await buy_dp_menu(update, context)
-
-    # Leaderboard
     elif data == "leaderboard":
         await leaderboard_menu(update, context)
-
-    # Self
     elif data == "self_menu":
         await self_menu(update, context)
     elif data == "self_activate":
         await self_activate_callback(update, context)
     elif data == "self_deactivate":
         await self_deactivate_callback(update, context)
-
-    # Like challenge
     elif data == "like_challenge":
         await like_challenge_menu(update, context)
     elif data == "like_activate":
         await like_activate_callback(update, context)
-
-    # Buy panel
     elif data == "buy_panel":
         await buy_panel_menu(update, context)
     elif data.startswith("panel_buy_"):
         await panel_buy_callback(update, context)
-
-    # Game
     elif data.startswith("join_game_"):
         await join_game_callback(update, context)
     elif data.startswith("cancel_game_"):
         await cancel_game_callback(update, context)
-
-    # Bank
     elif data == "bank_open":
         await bank_open_callback(update, context)
     elif data == "bank_auto_card":
@@ -2409,20 +2379,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await bank_withdraw_callback(update, context)
     elif data == "bank_wait":
         await bank_wait_callback(update, context)
-
-    # Factory
     elif data == "factory_open":
         await factory_open_callback(update, context)
     elif data == "factory_upgrade":
         await factory_upgrade_callback(update, context)
     elif data == "factory_collect":
         await factory_collect_callback(update, context)
-
-    # Check join ref
     elif data == "check_join_ref":
         await check_join_ref_callback(update, context)
-
-    # Admin callbacks
     elif data.startswith("admin_"):
         await admin_callbacks(update, context)
 
@@ -2430,17 +2394,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ PERIODIC TASKS ============
 
 async def periodic_maintenance(context: ContextTypes.DEFAULT_TYPE):
-    """Run maintenance tasks periodically"""
     conn = db.get_conn()
     c = conn.cursor()
 
-    # Factory maintenance for all active factories
     c.execute("SELECT user_id FROM users WHERE factory_active = 1")
     factory_users = c.fetchall()
     for fu in factory_users:
         db.factory_maintenance_due(fu['user_id'])
 
-    # Self maintenance
     c.execute("SELECT user_id FROM users WHERE self_active = 1")
     self_users = c.fetchall()
     for su in self_users:
@@ -2452,7 +2413,12 @@ async def periodic_maintenance(context: ContextTypes.DEFAULT_TYPE):
 # ============ MAIN ============
 
 def main():
-    """Start the bot"""
+    """Start the bot with Render Keep-Alive System"""
+    
+    # 1. روشن کردن وب سرور برای Render (بسیار مهم)
+    start_health_check_server()
+
+    # 2. ساخت اپلیکیشن
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Command handlers
@@ -2474,17 +2440,19 @@ def main():
         handle_private_message
     ))
 
-    # New chat members (bot added to group)
+    # New chat members
     application.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS,
         on_new_chat_members
     ))
 
-    # Periodic maintenance job (every 5 minutes)
+    # 3. تسک‌های دوره‌ای
     application.job_queue.run_repeating(periodic_maintenance, interval=300, first=10)
+    
+    # 4. سیستم Keep-Alive - هر 8 دقیقه یک بار خودپینگ
+    application.job_queue.run_repeating(send_self_ping, interval=480, first=60)
 
-    # Start polling
-    print("🏴 Dark Point Bot is running...")
+    print("🏴 Dark Point Bot is running with Keep-Alive system on Render...")
     application.run_polling(drop_pending_updates=True)
 
 
