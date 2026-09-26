@@ -1,18 +1,11 @@
 # config.py - Dark Point Bot Configuration
 
-# توکن ربات شما
 BOT_TOKEN = "8519305274:AAGF5rrvS9jLG2Lct3UqqaTcMLxjRHHIONA"
-
-# آیدی عددی ادمین
 ADMIN_IDS = [8248647747]
-
-# پشتیبانی
 SUPPORT_USERNAME = "@kanfingfreesup"
-
-# لاگ چنل
 LOG_CHANNEL_ID = -1001234567890
 
-# پنل سنایی
+# Panel API Settings
 PANEL_URL = "https://your-panel-url.com"
 PANEL_API_KEYS = {"snai": "9a80695b6e3fdfdae22ec69dc110b954"}
 PANEL_INBOUND_ID = 32063619
@@ -78,12 +71,6 @@ LEVEL_TITLES = {
     13: "👑 پادشاه تاریکی", 14: "🏆 افسانه‌ای", 15: "🔮 جادوگر سایه",
     16: "🐉 اژدهای تاریک", 17: "⚡ رعد تاریکی", 18: "🌪 طوفان سایه",
     19: "🔥 آتشین تاریک", 20: "🏴 امپراتور تاریکی",
-}
-
-STICKERS = {
-    "earn": "", "levelup": "", "game": "", "profile": "",
-    "bank": "", "factory": "", "welcome": "", "stars": "",
-    "crash": "", "money": "", "broadcast": "",
 }
 
 BUY_DP_AMOUNT = 500000
