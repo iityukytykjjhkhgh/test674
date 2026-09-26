@@ -1,5 +1,6 @@
 # database.py - Database Manager for Dark Point Bot
 
+import os
 import sqlite3
 import time
 import random
@@ -7,8 +8,18 @@ import string
 import threading
 
 class Database:
-    def __init__(self, db_name="darkpoint.db"):
-        self.db_name = db_name
+    def __init__(self):
+        # Render Persistent Disk Path
+        data_dir = os.environ.get('DATA_DIR', '.')
+        if data_dir != '.' and not os.path.exists(data_dir):
+            try:
+                os.makedirs(data_dir, exist_ok=True)
+            except Exception as e:
+                print(f"Warning: Could not create data dir: {e}")
+                data_dir = '.'
+        
+        self.db_name = os.path.join(data_dir, "darkpoint.db")
+        print(f"📁 Database path: {self.db_name}")
         self.lock = threading.Lock()
         self.init_db()
 
@@ -21,7 +32,6 @@ class Database:
         conn = self.get_conn()
         c = conn.cursor()
 
-        # Users table
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT DEFAULT '',
@@ -52,7 +62,6 @@ class Database:
             bought_dp INTEGER DEFAULT 0
         )''')
 
-        # Games table
         c.execute('''CREATE TABLE IF NOT EXISTS games (
             game_id INTEGER PRIMARY KEY AUTOINCREMENT,
             creator_id INTEGER,
@@ -66,7 +75,6 @@ class Database:
             created_at REAL DEFAULT 0
         )''')
 
-        # Transfers table
         c.execute('''CREATE TABLE IF NOT EXISTS transfers (
             transfer_id INTEGER PRIMARY KEY AUTOINCREMENT,
             from_id INTEGER,
@@ -76,7 +84,6 @@ class Database:
             created_at REAL DEFAULT 0
         )''')
 
-        # Panel orders
         c.execute('''CREATE TABLE IF NOT EXISTS panel_orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -87,7 +94,6 @@ class Database:
             created_at REAL DEFAULT 0
         )''')
 
-        # Gift orders
         c.execute('''CREATE TABLE IF NOT EXISTS gift_orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -97,7 +103,6 @@ class Database:
             created_at REAL DEFAULT 0
         )''')
 
-        # Stars withdrawal orders
         c.execute('''CREATE TABLE IF NOT EXISTS stars_orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -109,13 +114,11 @@ class Database:
             created_at REAL DEFAULT 0
         )''')
 
-        # Admin settings
         c.execute('''CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
         )''')
 
-        # Custom panels
         c.execute('''CREATE TABLE IF NOT EXISTS custom_panels (
             panel_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
@@ -126,7 +129,6 @@ class Database:
             created_at REAL DEFAULT 0
         )''')
 
-        # Checks (personal checks by admin)
         c.execute('''CREATE TABLE IF NOT EXISTS checks (
             check_id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT UNIQUE,
@@ -136,13 +138,11 @@ class Database:
             created_at REAL DEFAULT 0
         )''')
 
-        # Bank cards registry
         c.execute('''CREATE TABLE IF NOT EXISTS bank_cards (
             card_number TEXT PRIMARY KEY,
             user_id INTEGER
         )''')
 
-        # Leaderboard cache
         c.execute('''CREATE TABLE IF NOT EXISTS groups (
             chat_id INTEGER PRIMARY KEY,
             title TEXT DEFAULT '',
@@ -151,7 +151,6 @@ class Database:
             added_at REAL DEFAULT 0
         )''')
 
-        # Initialize default settings
         default_settings = {
             'gift_teddy_price': '750000',
             'gift_section_active': '1',
@@ -265,8 +264,6 @@ class Database:
     def set_claim(self, user_id, cooldown):
         self.update_user(user_id, last_claim_time=time.time(), last_cooldown=cooldown)
 
-    # ============ REFERRAL METHODS ============
-
     def add_referral(self, referrer_id):
         conn = self.get_conn()
         c = conn.cursor()
@@ -280,8 +277,6 @@ class Database:
             return user['referral_count']
         return 0
 
-    # ============ LEADERBOARD ============
-
     def get_leaderboard(self, limit=100):
         conn = self.get_conn()
         c = conn.cursor()
@@ -289,8 +284,6 @@ class Database:
         rows = c.fetchall()
         conn.close()
         return rows
-
-    # ============ GAME METHODS ============
 
     def create_game(self, creator_id, amount, chat_id, message_id):
         conn = self.get_conn()
@@ -336,8 +329,6 @@ class Database:
         conn.commit()
         conn.close()
 
-    # ============ TRANSFER METHODS ============
-
     def record_transfer(self, from_id, to_id, amount, fee):
         conn = self.get_conn()
         c = conn.cursor()
@@ -345,7 +336,7 @@ class Database:
                      VALUES (?, ?, ?, ?, ?)""",
                   (from_id, to_id, amount, fee, time.time()))
         conn.commit()
-        conn.close()    # ============ SETTINGS METHODS ============
+        conn.close()    # ============ SETTINGS ============
 
     def get_setting(self, key, default=""):
         conn = self.get_conn()
@@ -363,8 +354,6 @@ class Database:
         c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
         conn.commit()
         conn.close()
-
-    # ============ CUSTOM PANELS ============
 
     def add_custom_panel(self, name, description, price, data_limit):
         conn = self.get_conn()
@@ -392,8 +381,6 @@ class Database:
         conn.commit()
         conn.close()
 
-    # ============ GIFT ORDERS ============
-
     def create_gift_order(self, user_id, gift_type, price):
         conn = self.get_conn()
         c = conn.cursor()
@@ -404,8 +391,6 @@ class Database:
         conn.commit()
         conn.close()
         return order_id
-
-    # ============ STARS ORDERS ============
 
     def create_stars_order(self, user_id, target_id, target_type, amount, dp_cost):
         conn = self.get_conn()
@@ -418,8 +403,6 @@ class Database:
         conn.close()
         return order_id
 
-    # ============ PANEL ORDERS ============
-
     def create_panel_order(self, user_id, plan_name, price, config_data=""):
         conn = self.get_conn()
         c = conn.cursor()
@@ -430,8 +413,6 @@ class Database:
         conn.commit()
         conn.close()
         return order_id
-
-    # ============ CHECK METHODS ============
 
     def create_check(self, amount):
         code = ''.join(random.choices(string.ascii_lowercase * 4 + string.digits, k=16))
@@ -457,12 +438,9 @@ class Database:
         conn.close()
         return None
 
-    # ============ BANK METHODS ============
-
     def open_bank_account(self, user_id, card_number):
         conn = self.get_conn()
         c = conn.cursor()
-        # Check if card exists
         c.execute("SELECT * FROM bank_cards WHERE card_number = ?", (card_number,))
         if c.fetchone():
             conn.close()
@@ -542,8 +520,6 @@ class Database:
         conn.close()
         return exists
 
-    # ============ FACTORY METHODS ============
-
     def open_factory(self, user_id):
         self.update_user(user_id,
             factory_level=1,
@@ -593,10 +569,8 @@ class Database:
                 return cost
             else:
                 self.update_user(user_id, factory_active=0)
-                return -1  # Factory shut down
+                return -1
         return 0
-
-    # ============ GROUP METHODS ============
 
     def add_group(self, chat_id, title, member_count):
         conn = self.get_conn()
@@ -614,8 +588,6 @@ class Database:
         group = c.fetchone()
         conn.close()
         return group
-
-    # ============ SELF BOT ============
 
     def activate_self(self, user_id):
         self.update_user(user_id, self_active=1, self_activated_at=time.time())
