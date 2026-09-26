@@ -1,16 +1,16 @@
 # config.py - Dark Point Bot Configuration
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8519305274:AAF9h3mhJh3JPoJW3_vHWuxJGAtIWv02ZIg"
 
 # Admin IDs
-ADMIN_IDS = [123456789]  # آیدی عددی ادمین
+ADMIN_IDS = [8248647747]  # آیدی عددی ادمین
 
 # Support
 SUPPORT_USERNAME = "@kanfingfreesup"
 
 # Channels for force join
 FORCE_JOIN_CHANNELS = [
-    "@channel1",
+    "@kanfingfree",
     "@channel2",
 ]
 
