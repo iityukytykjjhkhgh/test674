@@ -1,4 +1,4 @@
-# database.py - Database Manager for Dark Point Bot
+# database.py - Database Manager
 
 import os
 import sqlite3
@@ -9,17 +9,16 @@ import threading
 
 class Database:
     def __init__(self):
-        # Render Persistent Disk Path
         data_dir = os.environ.get('DATA_DIR', '.')
         if data_dir != '.' and not os.path.exists(data_dir):
             try:
                 os.makedirs(data_dir, exist_ok=True)
             except Exception as e:
-                print(f"Warning: Could not create data dir: {e}")
+                print(f"Warning: {e}")
                 data_dir = '.'
         
         self.db_name = os.path.join(data_dir, "darkpoint.db")
-        print(f"📁 Database path: {self.db_name}")
+        print(f"📁 Database: {self.db_name}")
         self.lock = threading.Lock()
         self.init_db()
 
@@ -46,8 +45,6 @@ class Database:
             joined_channels INTEGER DEFAULT 0,
             captcha_verified INTEGER DEFAULT 0,
             created_at REAL DEFAULT 0,
-            self_active INTEGER DEFAULT 0,
-            self_activated_at REAL DEFAULT 0,
             like_challenge_active INTEGER DEFAULT 0,
             like_challenge_until REAL DEFAULT 0,
             factory_level INTEGER DEFAULT 0,
@@ -59,7 +56,11 @@ class Database:
             bank_balance INTEGER DEFAULT 0,
             bank_deposit_time REAL DEFAULT 0,
             bank_interest_collected INTEGER DEFAULT 0,
-            bought_dp INTEGER DEFAULT 0
+            bought_dp INTEGER DEFAULT 0,
+            is_banned INTEGER DEFAULT 0,
+            crash_games_played INTEGER DEFAULT 0,
+            crash_games_won INTEGER DEFAULT 0,
+            last_active REAL DEFAULT 0
         )''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS games (
@@ -70,6 +71,19 @@ class Database:
             joiner_id INTEGER DEFAULT 0,
             winner_id INTEGER DEFAULT 0,
             loser_id INTEGER DEFAULT 0,
+            chat_id INTEGER,
+            message_id INTEGER,
+            created_at REAL DEFAULT 0
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS crash_games (
+            game_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            bet_amount INTEGER,
+            crash_point REAL,
+            cashed_out REAL DEFAULT 0,
+            profit INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'playing',
             chat_id INTEGER,
             message_id INTEGER,
             created_at REAL DEFAULT 0
@@ -151,6 +165,24 @@ class Database:
             added_at REAL DEFAULT 0
         )''')
 
+        c.execute('''CREATE TABLE IF NOT EXISTS force_channels (
+            channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_username TEXT UNIQUE,
+            channel_title TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            added_at REAL DEFAULT 0
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS broadcast_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER,
+            message_type TEXT,
+            total_users INTEGER,
+            sent_count INTEGER,
+            failed_count INTEGER,
+            created_at REAL DEFAULT 0
+        )''')
+
         default_settings = {
             'gift_teddy_price': '750000',
             'gift_section_active': '1',
@@ -159,6 +191,9 @@ class Database:
             'buy_dp_active': '1',
             'buy_dp_amount': '500000',
             'buy_dp_price_toman': '50000',
+            'crash_active': '1',
+            'transfer_fee_percent': '10',
+            'referral_reward': '30000',
         }
 
         for key, value in default_settings.items():
@@ -179,9 +214,9 @@ class Database:
         conn = self.get_conn()
         c = conn.cursor()
         c.execute("""INSERT OR IGNORE INTO users 
-            (user_id, username, first_name, referrer_id, created_at) 
-            VALUES (?, ?, ?, ?, ?)""",
-            (user_id, username, first_name, referrer_id, time.time()))
+            (user_id, username, first_name, referrer_id, created_at, last_active) 
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, username, first_name, referrer_id, time.time(), time.time()))
         conn.commit()
         conn.close()
 
@@ -191,6 +226,13 @@ class Database:
         sets = ", ".join([f"{k} = ?" for k in kwargs.keys()])
         vals = list(kwargs.values()) + [user_id]
         c.execute(f"UPDATE users SET {sets} WHERE user_id = ?", vals)
+        conn.commit()
+        conn.close()
+
+    def update_last_active(self, user_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("UPDATE users SET last_active = ? WHERE user_id = ?", (time.time(), user_id))
         conn.commit()
         conn.close()
 
@@ -216,15 +258,21 @@ class Database:
 
     def get_balance(self, user_id):
         user = self.get_user(user_id)
-        if user:
-            return user['dark_points']
-        return 0
+        return user['dark_points'] if user else 0
 
     def get_level(self, user_id):
         user = self.get_user(user_id)
-        if user:
-            return user['level']
-        return 1
+        return user['level'] if user else 1
+
+    def ban_user(self, user_id):
+        self.update_user(user_id, is_banned=1)
+
+    def unban_user(self, user_id):
+        self.update_user(user_id, is_banned=0)
+
+    def is_banned(self, user_id):
+        u = self.get_user(user_id)
+        return u and u['is_banned'] == 1
 
     def check_and_update_level(self, user_id):
         from config import LEVEL_REQUIREMENTS, LEVEL_REWARDS
@@ -258,8 +306,7 @@ class Database:
             return 0
         elapsed = time.time() - user['last_claim_time']
         cooldown = user['last_cooldown']
-        remaining = cooldown - elapsed
-        return max(0, remaining)
+        return max(0, cooldown - elapsed)
 
     def set_claim(self, user_id, cooldown):
         self.update_user(user_id, last_claim_time=time.time(), last_cooldown=cooldown)
@@ -273,18 +320,51 @@ class Database:
 
     def get_referral_count(self, user_id):
         user = self.get_user(user_id)
-        if user:
-            return user['referral_count']
-        return 0
+        return user['referral_count'] if user else 0
 
     def get_leaderboard(self, limit=100):
         conn = self.get_conn()
         c = conn.cursor()
-        c.execute("SELECT user_id, username, first_name, dark_points, level FROM users ORDER BY dark_points DESC LIMIT ?", (limit,))
+        c.execute("SELECT user_id, username, first_name, dark_points, level FROM users WHERE is_banned = 0 ORDER BY dark_points DESC LIMIT ?", (limit,))
         rows = c.fetchall()
         conn.close()
         return rows
 
+    def get_all_user_ids(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE is_banned = 0")
+        rows = c.fetchall()
+        conn.close()
+        return [r['user_id'] for r in rows]
+
+    def get_active_users_count(self, days=7):
+        conn = self.get_conn()
+        c = conn.cursor()
+        threshold = time.time() - (days * 86400)
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE last_active > ?", (threshold,))
+        row = c.fetchone()
+        conn.close()
+        return row['cnt'] if row else 0
+
+    def get_new_users_today(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        today_start = time.time() - 86400
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE created_at > ?", (today_start,))
+        row = c.fetchone()
+        conn.close()
+        return row['cnt'] if row else 0
+
+    def get_total_dp_in_circulation(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT COALESCE(SUM(dark_points), 0) as total FROM users")
+        row = c.fetchone()
+        conn.close()
+        return row['total'] if row else 0
+
+    # Game methods
     def create_game(self, creator_id, amount, chat_id, message_id):
         conn = self.get_conn()
         c = conn.cursor()
@@ -329,24 +409,68 @@ class Database:
         conn.commit()
         conn.close()
 
-    def record_transfer(self, from_id, to_id, amount, fee):
+    # Crash game methods
+    def create_crash_game(self, user_id, bet, crash_point, chat_id, message_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("""INSERT INTO crash_games (user_id, bet_amount, crash_point, chat_id, message_id, created_at) 
+                     VALUES (?, ?, ?, ?, ?, ?)""",
+                  (user_id, bet, crash_point, chat_id, message_id, time.time()))
+        gid = c.lastrowid
+        conn.commit()
+        conn.close()
+        return gid
+
+    def get_crash_game(self, game_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM crash_games WHERE game_id = ?", (game_id,))
+        g = c.fetchone()
+        conn.close()
+        return g
+
+    def cashout_crash_game(self, game_id, multiplier, profit):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("UPDATE crash_games SET cashed_out = ?, profit = ?, status = 'won' WHERE game_id = ? AND status = 'playing'",
+                  (multiplier, profit, game_id))
+        affected = c.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
+
+    def crash_game_lost(self, game_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("UPDATE crash_games SET status = 'lost' WHERE game_id = ?", (game_id,))
+        conn.commit()
+        conn.close()
+
+    def increment_crash_stats(self, user_id, won=False):
+        conn = self.get_conn()
+        c = conn.cursor()
+        if won:
+            c.execute("UPDATE users SET crash_games_played = crash_games_played + 1, crash_games_won = crash_games_won + 1 WHERE user_id = ?", (user_id,))
+        else:
+            c.execute("UPDATE users SET crash_games_played = crash_games_played + 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()    def record_transfer(self, from_id, to_id, amount, fee):
         conn = self.get_conn()
         c = conn.cursor()
         c.execute("""INSERT INTO transfers (from_id, to_id, amount, fee, created_at) 
                      VALUES (?, ?, ?, ?, ?)""",
                   (from_id, to_id, amount, fee, time.time()))
         conn.commit()
-        conn.close()    # ============ SETTINGS ============
+        conn.close()
 
+    # ============ SETTINGS ============
     def get_setting(self, key, default=""):
         conn = self.get_conn()
         c = conn.cursor()
         c.execute("SELECT value FROM settings WHERE key = ?", (key,))
         row = c.fetchone()
         conn.close()
-        if row:
-            return row['value']
-        return default
+        return row['value'] if row else default
 
     def set_setting(self, key, value):
         conn = self.get_conn()
@@ -355,16 +479,46 @@ class Database:
         conn.commit()
         conn.close()
 
+    # ============ FORCE JOIN CHANNELS ============
+    def add_force_channel(self, username, title=""):
+        conn = self.get_conn()
+        c = conn.cursor()
+        try:
+            c.execute("INSERT INTO force_channels (channel_username, channel_title, added_at) VALUES (?, ?, ?)",
+                      (username, title, time.time()))
+            conn.commit()
+            success = True
+        except:
+            success = False
+        conn.close()
+        return success
+
+    def remove_force_channel(self, channel_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM force_channels WHERE channel_id = ?", (channel_id,))
+        conn.commit()
+        conn.close()
+
+    def get_force_channels(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM force_channels WHERE active = 1")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
+    # ============ CUSTOM PANELS ============
     def add_custom_panel(self, name, description, price, data_limit):
         conn = self.get_conn()
         c = conn.cursor()
         c.execute("""INSERT INTO custom_panels (name, description, price, data_limit, created_at) 
                      VALUES (?, ?, ?, ?, ?)""",
                   (name, description, price, data_limit, time.time()))
-        panel_id = c.lastrowid
+        pid = c.lastrowid
         conn.commit()
         conn.close()
-        return panel_id
+        return pid
 
     def get_custom_panels(self):
         conn = self.get_conn()
@@ -387,10 +541,10 @@ class Database:
         c.execute("""INSERT INTO gift_orders (user_id, gift_type, price, created_at) 
                      VALUES (?, ?, ?, ?)""",
                   (user_id, gift_type, price, time.time()))
-        order_id = c.lastrowid
+        oid = c.lastrowid
         conn.commit()
         conn.close()
-        return order_id
+        return oid
 
     def create_stars_order(self, user_id, target_id, target_type, amount, dp_cost):
         conn = self.get_conn()
@@ -398,10 +552,10 @@ class Database:
         c.execute("""INSERT INTO stars_orders (user_id, target_id, target_type, amount, dp_cost, created_at) 
                      VALUES (?, ?, ?, ?, ?, ?)""",
                   (user_id, target_id, target_type, amount, dp_cost, time.time()))
-        order_id = c.lastrowid
+        oid = c.lastrowid
         conn.commit()
         conn.close()
-        return order_id
+        return oid
 
     def create_panel_order(self, user_id, plan_name, price, config_data=""):
         conn = self.get_conn()
@@ -409,10 +563,10 @@ class Database:
         c.execute("""INSERT INTO panel_orders (user_id, plan_name, price, config_data, created_at) 
                      VALUES (?, ?, ?, ?, ?)""",
                   (user_id, plan_name, price, config_data, time.time()))
-        order_id = c.lastrowid
+        oid = c.lastrowid
         conn.commit()
         conn.close()
-        return order_id
+        return oid
 
     def create_check(self, amount):
         code = ''.join(random.choices(string.ascii_lowercase * 4 + string.digits, k=16))
@@ -438,6 +592,7 @@ class Database:
         conn.close()
         return None
 
+    # Bank
     def open_bank_account(self, user_id, card_number):
         conn = self.get_conn()
         c = conn.cursor()
@@ -520,6 +675,7 @@ class Database:
         conn.close()
         return exists
 
+    # Factory
     def open_factory(self, user_id):
         self.update_user(user_id,
             factory_level=1,
@@ -581,39 +737,6 @@ class Database:
         conn.commit()
         conn.close()
 
-    def get_group(self, chat_id):
-        conn = self.get_conn()
-        c = conn.cursor()
-        c.execute("SELECT * FROM groups WHERE chat_id = ?", (chat_id,))
-        group = c.fetchone()
-        conn.close()
-        return group
-
-    def activate_self(self, user_id):
-        self.update_user(user_id, self_active=1, self_activated_at=time.time())
-
-    def deactivate_self(self, user_id):
-        self.update_user(user_id, self_active=0)
-
-    def self_maintenance_due(self, user_id):
-        from config import SELF_HOURLY_COST
-        user = self.get_user(user_id)
-        if not user or not user['self_active']:
-            return 0
-
-        elapsed_hours = (time.time() - user['self_activated_at']) / 3600.0
-        hours_due = int(elapsed_hours)
-        cost = hours_due * SELF_HOURLY_COST
-
-        if cost > 0:
-            if self.remove_dark_points(user_id, cost):
-                self.update_user(user_id, self_activated_at=time.time())
-                return cost
-            else:
-                self.deactivate_self(user_id)
-                return -1
-        return 0
-
     def get_all_users_count(self):
         conn = self.get_conn()
         c = conn.cursor()
@@ -622,5 +745,64 @@ class Database:
         conn.close()
         return row['cnt'] if row else 0
 
-    def get_user_by_id(self, user_id):
+    def log_broadcast(self, admin_id, msg_type, total, sent, failed):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("""INSERT INTO broadcast_logs (admin_id, message_type, total_users, sent_count, failed_count, created_at) 
+                     VALUES (?, ?, ?, ?, ?, ?)""",
+                  (admin_id, msg_type, total, sent, failed, time.time()))
+        conn.commit()
+        conn.close()
+
+    def get_stats(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        
+        stats = {}
+        c.execute("SELECT COUNT(*) as cnt FROM users")
+        stats['total_users'] = c.fetchone()['cnt']
+        
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE is_banned = 1")
+        stats['banned_users'] = c.fetchone()['cnt']
+        
+        threshold = time.time() - (7 * 86400)
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE last_active > ?", (threshold,))
+        stats['active_7d'] = c.fetchone()['cnt']
+        
+        today = time.time() - 86400
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE created_at > ?", (today,))
+        stats['new_today'] = c.fetchone()['cnt']
+        
+        c.execute("SELECT COALESCE(SUM(dark_points), 0) as total FROM users")
+        stats['total_dp'] = c.fetchone()['total']
+        
+        c.execute("SELECT COALESCE(SUM(bank_balance), 0) as total FROM users")
+        stats['total_bank'] = c.fetchone()['total']
+        
+        c.execute("SELECT COUNT(*) as cnt FROM panel_orders")
+        stats['panel_orders'] = c.fetchone()['cnt']
+        
+        c.execute("SELECT COUNT(*) as cnt FROM gift_orders")
+        stats['gift_orders'] = c.fetchone()['cnt']
+        
+        c.execute("SELECT COUNT(*) as cnt FROM stars_orders")
+        stats['stars_orders'] = c.fetchone()['cnt']
+        
+        c.execute("SELECT COUNT(*) as cnt FROM crash_games WHERE status = 'won'")
+        stats['crash_won'] = c.fetchone()['cnt']
+        
+        c.execute("SELECT COUNT(*) as cnt FROM crash_games WHERE status = 'lost'")
+        stats['crash_lost'] = c.fetchone()['cnt']
+        
+        conn.close()
+        return stats    def get_user_by_id(self, user_id):
         return self.get_user(user_id)
+
+    def search_user_by_username(self, username):
+        conn = self.get_conn()
+        c = conn.cursor()
+        username = username.replace("@", "")
+        c.execute("SELECT * FROM users WHERE username = ?", (username,))
+        u = c.fetchone()
+        conn.close()
+        return u
