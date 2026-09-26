@@ -1,6 +1,6 @@
 # config.py - Dark Point Bot Configuration
 
-BOT_TOKEN = "8519305274:AAF9h3mhJh3JPoJW3_vHWuxJGAtIWv02ZIg"
+BOT_TOKEN = "8519305274:AAGF5rrvS9jLG2Lct3UqqaTcMLxjRHHIONA"
 
 ADMIN_IDS = [8248647747]
 SUPPORT_USERNAME = "@kanfingfreesup"
