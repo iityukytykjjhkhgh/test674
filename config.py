@@ -3,9 +3,16 @@
 BOT_TOKEN = "8519305274:AAGF5rrvS9jLG2Lct3UqqaTcMLxjRHHIONA"
 ADMIN_IDS = [8248647747]
 SUPPORT_USERNAME = "@kanfingfreesup"
-LOG_CHANNEL_ID = -1001234567890
 
-# Panel API Settings
+# کانال لاگ سفارشات (آیدی عددی)
+# برای گرفتن آیدی عددی کانال: ربات @userinfobot را به کانال اضافه کنید
+# یا از ربات @RawDataBot استفاده کنید
+LOG_CHANNEL_ID = -1004482670552  # آیدی عددی کانال @starsdarkconfig
+# ⚠️ مهم: آیدی عددی کانال را اینجا قرار دهید (نه یوزرنیم)
+# ⚠️ ربات باید ادمین کانال باشد
+
+LOG_CHANNEL_USERNAME = "@starsdarkconfig"
+
 PANEL_URL = "https://your-panel-url.com"
 PANEL_API_KEYS = {"snai": "9a80695b6e3fdfdae22ec69dc110b954"}
 PANEL_INBOUND_ID = 32063619
@@ -43,6 +50,9 @@ MIN_GROUP_MEMBERS = 30
 CRASH_MIN_BET = 500
 CRASH_MAX_BET = 500000
 CRASH_MAX_MULTIPLIER = 15.0
+
+# بازی تاس
+DICE_MIN_BET = 15000
 
 LEVEL_REQUIREMENTS = {
     1: 0, 2: 20000, 3: 40000, 4: 80000, 5: 150000,
