@@ -1,4 +1,4 @@
-# database.py - Database Manager
+# database.py
 
 import os
 import sqlite3
@@ -68,13 +68,14 @@ class Database:
                 last_active REAL DEFAULT 0,
                 first_reward_claimed INTEGER DEFAULT 0,
                 last_wheel_spin REAL DEFAULT 0,
-                completed_tasks TEXT DEFAULT ''
+                completed_tasks TEXT DEFAULT '',
+                transfer_count_today INTEGER DEFAULT 0,
+                last_transfer_day REAL DEFAULT 0
             )''')
 
             # Auto-Migration
             c.execute("PRAGMA table_info(users)")
             existing_cols = [row[1] for row in c.fetchall()]
-            
             needed_cols = {
                 'is_banned': 'INTEGER DEFAULT 0',
                 'crash_games_played': 'INTEGER DEFAULT 0',
@@ -83,6 +84,8 @@ class Database:
                 'first_reward_claimed': 'INTEGER DEFAULT 0',
                 'last_wheel_spin': 'REAL DEFAULT 0',
                 'completed_tasks': "TEXT DEFAULT ''",
+                'transfer_count_today': 'INTEGER DEFAULT 0',
+                'last_transfer_day': 'REAL DEFAULT 0',
                 'dark_points': 'INTEGER DEFAULT 0',
                 'total_earned': 'INTEGER DEFAULT 0',
                 'level': 'INTEGER DEFAULT 1',
@@ -208,8 +211,18 @@ class Database:
                 title TEXT DEFAULT '',
                 member_count INTEGER DEFAULT 0,
                 bot_active INTEGER DEFAULT 1,
+                is_admin INTEGER DEFAULT 0,
                 added_at REAL DEFAULT 0
             )''')
+
+            # Auto migration groups
+            c.execute("PRAGMA table_info(groups)")
+            group_cols = [row[1] for row in c.fetchall()]
+            if 'is_admin' not in group_cols:
+                try:
+                    c.execute("ALTER TABLE groups ADD COLUMN is_admin INTEGER DEFAULT 0")
+                except Exception:
+                    pass
 
             c.execute('''CREATE TABLE IF NOT EXISTS force_channels (
                 channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,13 +232,51 @@ class Database:
                 added_at REAL DEFAULT 0
             )''')
 
-            # جدول تسک ها
+            # تسک - با فیلدهای جدید
             c.execute('''CREATE TABLE IF NOT EXISTS tasks (
                 task_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_username TEXT,
+                task_type TEXT DEFAULT 'channel',
+                channel_username TEXT DEFAULT '',
                 channel_title TEXT DEFAULT '',
+                description TEXT DEFAULT '',
                 reward INTEGER DEFAULT 0,
+                capacity INTEGER DEFAULT 0,
+                completed_count INTEGER DEFAULT 0,
                 active INTEGER DEFAULT 1,
+                created_at REAL DEFAULT 0
+            )''')
+
+            # Auto migration tasks
+            c.execute("PRAGMA table_info(tasks)")
+            task_cols = [row[1] for row in c.fetchall()]
+            if 'task_type' not in task_cols:
+                try:
+                    c.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'channel'")
+                except Exception:
+                    pass
+            if 'description' not in task_cols:
+                try:
+                    c.execute("ALTER TABLE tasks ADD COLUMN description TEXT DEFAULT ''")
+                except Exception:
+                    pass
+            if 'capacity' not in task_cols:
+                try:
+                    c.execute("ALTER TABLE tasks ADD COLUMN capacity INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+            if 'completed_count' not in task_cols:
+                try:
+                    c.execute("ALTER TABLE tasks ADD COLUMN completed_count INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+
+            # درخواست‌های تایید تسک ماموریت
+            c.execute('''CREATE TABLE IF NOT EXISTS mission_requests (
+                request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                task_id INTEGER,
+                status TEXT DEFAULT 'pending',
+                admin_note TEXT DEFAULT '',
                 created_at REAL DEFAULT 0
             )''')
 
@@ -253,17 +304,19 @@ class Database:
                 'casino_active': '1',
                 'bomb_active': '1',
                 'wheel_active': '1',
+                'football_active': '1',
                 'referral_reward': '30000',
                 'first_join_reward': '50000',
                 'tasks_active': '1',
+                'buy_panel_active': '1',
+                'bot_active': '1',  # کل ربات
             }
 
             for key, value in default_settings.items():
                 c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
 
             conn.commit()
-            conn.close()    # ============ USER METHODS ============
-
+            conn.close()    # ========== USER METHODS ==========
     def get_user(self, user_id):
         conn = self.get_conn()
         c = conn.cursor()
@@ -350,21 +403,17 @@ class Database:
         user = self.get_user(user_id)
         if not user:
             return None, None
-
         current_level = user['level']
         total_earned = user['total_earned']
         new_level = current_level
-
         for lvl in range(20, 0, -1):
             if total_earned >= LEVEL_REQUIREMENTS.get(lvl, float('inf')):
                 new_level = lvl
                 break
-
         if new_level > current_level:
             reward = 0
             for lvl in range(current_level + 1, new_level + 1):
                 reward += LEVEL_REWARDS.get(lvl, 0)
-
             self.update_user(user_id, level=new_level)
             if reward > 0:
                 self.add_dark_points(user_id, reward)
@@ -376,8 +425,7 @@ class Database:
         if not user:
             return 0
         elapsed = time.time() - user['last_claim_time']
-        cooldown = user['last_cooldown']
-        return max(0, cooldown - elapsed)
+        return max(0, user['last_cooldown'] - elapsed)
 
     def set_claim(self, user_id, cooldown):
         self.update_user(user_id, last_claim_time=time.time(), last_cooldown=cooldown)
@@ -412,13 +460,9 @@ class Database:
         conn.close()
         return [r['user_id'] for r in rows]
 
-    # اولین ورود
     def claim_first_reward(self, user_id):
-        """بررسی و پرداخت هدیه اولین ورود"""
         u = self.get_user(user_id)
-        if not u:
-            return False
-        if u['first_reward_claimed']:
+        if not u or u['first_reward_claimed']:
             return False
         from config import FIRST_JOIN_REWARD
         reward = int(self.get_setting('first_join_reward', str(FIRST_JOIN_REWARD)))
@@ -426,9 +470,41 @@ class Database:
         self.update_user(user_id, first_reward_claimed=1)
         return reward
 
-    # گردونه شانس
+    # محدودیت انتقال روزانه
+    def can_transfer(self, user_id):
+        from config import MAX_DAILY_TRANSFERS
+        u = self.get_user(user_id)
+        if not u:
+            return False, 0
+        
+        now = time.time()
+        last_day = u.get('last_transfer_day', 0) if isinstance(u, dict) else u['last_transfer_day']
+        count = u.get('transfer_count_today', 0) if isinstance(u, dict) else u['transfer_count_today']
+        
+        # ریست شمارنده بعد از ۲۴ ساعت
+        if now - last_day >= 86400:
+            self.update_user(user_id, transfer_count_today=0, last_transfer_day=now)
+            return True, MAX_DAILY_TRANSFERS
+        
+        if count >= MAX_DAILY_TRANSFERS:
+            remaining = 86400 - (now - last_day)
+            return False, remaining
+        
+        return True, MAX_DAILY_TRANSFERS - count
+
+    def increment_transfer_count(self, user_id):
+        u = self.get_user(user_id)
+        if not u:
+            return
+        now = time.time()
+        last_day = u['last_transfer_day']
+        if now - last_day >= 86400:
+            self.update_user(user_id, transfer_count_today=1, last_transfer_day=now)
+        else:
+            self.update_user(user_id, transfer_count_today=u['transfer_count_today'] + 1)
+
+    # گردونه
     def can_spin_wheel_free(self, user_id):
-        """آیا کاربر می‌تواند گردونه رایگان بچرخاند؟"""
         u = self.get_user(user_id)
         if not u:
             return False, 0
@@ -436,32 +512,37 @@ class Database:
         elapsed = time.time() - u['last_wheel_spin']
         if elapsed >= WHEEL_FREE_INTERVAL:
             return True, 0
-        remaining = WHEEL_FREE_INTERVAL - elapsed
-        return False, remaining
+        return False, WHEEL_FREE_INTERVAL - elapsed
 
     def set_wheel_spin_time(self, user_id):
         self.update_user(user_id, last_wheel_spin=time.time())
 
-    # تسک ها
-    def add_task(self, channel_username, channel_title, reward):
+    # تسک‌ها
+    def add_task(self, task_type, channel_username, channel_title, description, reward, capacity=0):
         with self.lock:
             conn = self.get_conn()
             c = conn.cursor()
-            c.execute("""INSERT INTO tasks (channel_username, channel_title, reward, created_at) 
-                         VALUES (?, ?, ?, ?)""",
-                      (channel_username, channel_title, reward, time.time()))
+            c.execute("""INSERT INTO tasks (task_type, channel_username, channel_title, description, reward, capacity, created_at) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      (task_type, channel_username, channel_title, description, reward, capacity, time.time()))
             tid = c.lastrowid
             conn.commit()
             conn.close()
             return tid
 
-    def get_tasks(self, only_active=True):
+    def get_tasks(self, task_type=None, only_active=True):
         conn = self.get_conn()
         c = conn.cursor()
-        if only_active:
-            c.execute("SELECT * FROM tasks WHERE active = 1 ORDER BY task_id ASC")
+        if task_type:
+            if only_active:
+                c.execute("SELECT * FROM tasks WHERE active = 1 AND task_type = ? ORDER BY task_id ASC", (task_type,))
+            else:
+                c.execute("SELECT * FROM tasks WHERE task_type = ? ORDER BY task_id ASC", (task_type,))
         else:
-            c.execute("SELECT * FROM tasks ORDER BY task_id ASC")
+            if only_active:
+                c.execute("SELECT * FROM tasks WHERE active = 1 ORDER BY task_id ASC")
+            else:
+                c.execute("SELECT * FROM tasks ORDER BY task_id ASC")
         rows = c.fetchall()
         conn.close()
         return rows
@@ -482,13 +563,26 @@ class Database:
             conn.commit()
             conn.close()
 
+    def increment_task_completed(self, task_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE tasks SET completed_count = completed_count + 1 WHERE task_id = ?", (task_id,))
+            conn.commit()
+            conn.close()
+
+    def is_task_full(self, task_id):
+        t = self.get_task(task_id)
+        if not t or t['capacity'] == 0:
+            return False
+        return t['completed_count'] >= t['capacity']
+
     def is_task_completed(self, user_id, task_id):
         u = self.get_user(user_id)
         if not u:
             return False
         completed = u['completed_tasks'] or ''
-        tasks_list = completed.split(',') if completed else []
-        return str(task_id) in tasks_list
+        return str(task_id) in completed.split(',')
 
     def mark_task_completed(self, user_id, task_id):
         u = self.get_user(user_id)
@@ -499,8 +593,52 @@ class Database:
         if str(task_id) not in tasks_list:
             tasks_list.append(str(task_id))
             self.update_user(user_id, completed_tasks=','.join(tasks_list))
+            self.increment_task_completed(task_id)
 
-    # Games
+    # درخواست‌های ماموریت
+    def create_mission_request(self, user_id, task_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO mission_requests (user_id, task_id, created_at) 
+                         VALUES (?, ?, ?)""",
+                      (user_id, task_id, time.time()))
+            rid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return rid
+
+    def get_mission_request(self, request_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM mission_requests WHERE request_id = ?", (request_id,))
+        r = c.fetchone()
+        conn.close()
+        return r
+
+    def approve_mission_request(self, request_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE mission_requests SET status = 'approved' WHERE request_id = ?", (request_id,))
+            conn.commit()
+            conn.close()
+
+    def reject_mission_request(self, request_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE mission_requests SET status = 'rejected' WHERE request_id = ?", (request_id,))
+            conn.commit()
+            conn.close()
+
+    def has_pending_mission_request(self, user_id, task_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM mission_requests WHERE user_id = ? AND task_id = ? AND status = 'pending'", (user_id, task_id))
+        r = c.fetchone()
+        conn.close()
+        return r is not None    # Games
     def create_game(self, creator_id, amount, chat_id, message_id):
         with self.lock:
             conn = self.get_conn()
@@ -549,6 +687,7 @@ class Database:
             conn.commit()
             conn.close()
 
+    # Crash
     def create_crash_game(self, user_id, bet, crash_point, chat_id, message_id):
         with self.lock:
             conn = self.get_conn()
@@ -607,7 +746,9 @@ class Database:
                          VALUES (?, ?, ?, ?, ?)""",
                       (from_id, to_id, amount, fee, time.time()))
             conn.commit()
-            conn.close()    # ============ SETTINGS ============
+            conn.close()
+
+    # Settings
     def get_setting(self, key, default=""):
         conn = self.get_conn()
         c = conn.cursor()
@@ -674,11 +815,19 @@ class Database:
         conn.close()
         return rows
 
+    def get_all_custom_panels(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM custom_panels ORDER BY panel_id ASC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
     def delete_custom_panel(self, panel_id):
         with self.lock:
             conn = self.get_conn()
             c = conn.cursor()
-            c.execute("UPDATE custom_panels SET active = 0 WHERE panel_id = ?", (panel_id,))
+            c.execute("DELETE FROM custom_panels WHERE panel_id = ?", (panel_id,))
             conn.commit()
             conn.close()
 
@@ -736,8 +885,7 @@ class Database:
             c.execute("SELECT * FROM checks WHERE code = ? AND claimed = 0", (code,))
             check = c.fetchone()
             if check:
-                c.execute("UPDATE checks SET claimed = 1, claimed_by = ? WHERE code = ?",
-                          (user_id, code))
+                c.execute("UPDATE checks SET claimed = 1, claimed_by = ? WHERE code = ?", (user_id, code))
                 conn.commit()
                 conn.close()
                 return check['amount']
@@ -767,13 +915,9 @@ class Database:
             if not user or user['dark_points'] < amount:
                 conn.close()
                 return False
-            c.execute("""UPDATE users SET 
-                dark_points = dark_points - ?,
-                bank_balance = bank_balance + ?,
-                bank_deposit_time = ?,
-                bank_interest_collected = 0
-                WHERE user_id = ?""",
-                (amount, amount, time.time(), user_id))
+            c.execute("""UPDATE users SET dark_points = dark_points - ?,
+                bank_balance = bank_balance + ?, bank_deposit_time = ?, bank_interest_collected = 0
+                WHERE user_id = ?""", (amount, amount, time.time(), user_id))
             conn.commit()
             conn.close()
             return True
@@ -788,22 +932,12 @@ class Database:
             if not user or user['bank_balance'] <= 0:
                 conn.close()
                 return 0, 0
-
             balance = user['bank_balance']
-            deposit_time = user['bank_deposit_time']
-            elapsed = time.time() - deposit_time
-
-            interest = 0
-            if elapsed >= 86400 and not user['bank_interest_collected']:
-                interest = int(balance * BANK_INTEREST_RATE)
-
+            elapsed = time.time() - user['bank_deposit_time']
+            interest = int(balance * BANK_INTEREST_RATE) if elapsed >= 86400 and not user['bank_interest_collected'] else 0
             total = balance + interest
-            c.execute("""UPDATE users SET 
-                dark_points = dark_points + ?,
-                bank_balance = 0,
-                bank_deposit_time = 0,
-                bank_interest_collected = 0
-                WHERE user_id = ?""",
+            c.execute("""UPDATE users SET dark_points = dark_points + ?,
+                bank_balance = 0, bank_deposit_time = 0, bank_interest_collected = 0 WHERE user_id = ?""",
                 (total, user_id))
             conn.commit()
             conn.close()
@@ -829,31 +963,22 @@ class Database:
         return exists
 
     def open_factory(self, user_id):
-        self.update_user(user_id,
-            factory_level=1,
-            factory_active=1,
-            factory_last_collect=time.time(),
-            factory_last_maintenance=time.time()
-        )
+        self.update_user(user_id, factory_level=1, factory_active=1,
+                         factory_last_collect=time.time(), factory_last_maintenance=time.time())
 
     def reactivate_factory(self, user_id):
-        """فعال‌سازی مجدد کارخونه پس از خاموش شدن"""
         u = self.get_user(user_id)
         if not u or u['factory_level'] == 0:
             return False
-        self.update_user(user_id,
-            factory_active=1,
-            factory_last_collect=time.time(),
-            factory_last_maintenance=time.time()
-        )
+        self.update_user(user_id, factory_active=1,
+                         factory_last_collect=time.time(), factory_last_maintenance=time.time())
         return True
 
     def upgrade_factory(self, user_id):
         user = self.get_user(user_id)
         if not user or user['factory_level'] >= 5:
             return False
-        new_level = user['factory_level'] + 1
-        self.update_user(user_id, factory_level=new_level)
+        self.update_user(user_id, factory_level=user['factory_level'] + 1)
         return True
 
     def collect_factory(self, user_id):
@@ -861,16 +986,13 @@ class Database:
         user = self.get_user(user_id)
         if not user or not user['factory_active'] or user['factory_level'] == 0:
             return 0
-
         level = user['factory_level']
         mine_per_min = FACTORY_LEVELS[level]['mine_per_min']
         elapsed_min = (time.time() - user['factory_last_collect']) / 60.0
         mined = int(elapsed_min * mine_per_min)
-
         if mined > 0:
             self.add_dark_points(user_id, mined)
             self.update_user(user_id, factory_last_collect=time.time())
-
         return mined
 
     def factory_maintenance_due(self, user_id):
@@ -878,11 +1000,9 @@ class Database:
         user = self.get_user(user_id)
         if not user or not user['factory_active']:
             return 0
-
         elapsed_hours = (time.time() - user['factory_last_maintenance']) / 3600.0
         hours_due = int(elapsed_hours)
         cost = hours_due * FACTORY_HOURLY_MAINTENANCE
-
         if cost > 0:
             if self.remove_dark_points(user_id, cost):
                 self.update_user(user_id, factory_last_maintenance=time.time())
@@ -892,13 +1012,39 @@ class Database:
                 return -1
         return 0
 
-    def add_group(self, chat_id, title, member_count):
+    # گروه‌ها با ادمین بودن
+    def add_or_update_group(self, chat_id, title, member_count, is_admin=0):
         with self.lock:
             conn = self.get_conn()
             c = conn.cursor()
-            c.execute("""INSERT OR REPLACE INTO groups (chat_id, title, member_count, added_at) 
-                         VALUES (?, ?, ?, ?)""",
-                      (chat_id, title, member_count, time.time()))
+            c.execute("""INSERT OR REPLACE INTO groups (chat_id, title, member_count, is_admin, added_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (chat_id, title, member_count, is_admin, time.time()))
+            conn.commit()
+            conn.close()
+
+    def get_all_groups(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM groups ORDER BY added_at DESC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
+    def get_admin_groups(self):
+        """گروه‌هایی که ربات در آن‌ها ادمین است"""
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM groups WHERE is_admin = 1")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
+    def update_group_admin_status(self, chat_id, is_admin):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE groups SET is_admin = ? WHERE chat_id = ?", (is_admin, chat_id))
             conn.commit()
             conn.close()
 
@@ -948,6 +1094,10 @@ class Database:
         stats['crash_won'] = c.fetchone()['cnt']
         c.execute("SELECT COUNT(*) as cnt FROM crash_games WHERE status = 'lost'")
         stats['crash_lost'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM groups WHERE is_admin = 1")
+        stats['admin_groups'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM groups")
+        stats['total_groups'] = c.fetchone()['cnt']
         conn.close()
         return stats
 
