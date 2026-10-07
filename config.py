@@ -4,11 +4,9 @@ BOT_TOKEN = "8519305274:AAGF5rrvS9jLG2Lct3UqqaTcMLxjRHHIONA"
 ADMIN_IDS = [8248647747]
 SUPPORT_USERNAME = "@kanfingfreesup"
 
-# آیدی عددی کانال لاگ
 LOG_CHANNEL_ID = -1004482670552
 LOG_CHANNEL_USERNAME = "@starsdarkconfig"
 
-# Panel API
 PANEL_URL = "https://your-panel-url.com"
 PANEL_API_KEYS = {"snai": "9a80695b6e3fdfdae22ec69dc110b954"}
 PANEL_INBOUND_ID = 32063619
@@ -24,19 +22,14 @@ DEFAULT_STARS_PRICE = 1000000
 STARS_AMOUNT = 50
 LIKE_CHALLENGE_COST = 30000
 
-# پاداش زیرمجموعه (قابل تغییر از پنل ادمین)
 DEFAULT_REFERRAL_REWARD = 30000
-REFERRAL_REWARD = 30000  # پیش‌فرض
-
-# پاداش اولین ورود
+REFERRAL_REWARD = 30000
 FIRST_JOIN_REWARD = 50000
 
-# بانک: سود ۲۴ ساعته ۱۵٪
 BANK_OPEN_COST = 20000
 BANK_INTEREST_RATE = 0.15
 BANK_INTEREST_PERIOD = 86400
 
-# کارخونه
 FACTORY_OPEN_COST = 100000
 FACTORY_HOURLY_MAINTENANCE = 80
 FACTORY_LEVELS = {
@@ -51,6 +44,9 @@ MIN_GAME_AMOUNT = 100
 TRANSFER_FEE = 0.10
 MIN_GROUP_MEMBERS = 30
 
+# محدودیت انتقال روزانه
+MAX_DAILY_TRANSFERS = 10
+
 # بازی انفجار
 CRASH_MIN_BET = 500
 CRASH_MAX_BET = 500000
@@ -59,20 +55,28 @@ CRASH_MAX_MULTIPLIER = 15.0
 # بازی تاس
 DICE_MIN_BET = 15000
 
-# بازی حدس بزن (1 تا 10)
+# بازی حدس بزن
 GUESS_MIN_BET = 30000
 
 # بازی کازینو
 CASINO_MIN_BET = 25000
 
-# بازی بمب
+# بازی بمب (۶ بمب، ضریب ۰.۴)
 BOMB_MIN_BET = 35000
+BOMB_COUNT = 6
+BOMB_MULTIPLIER_STEP = 0.4
+
+# بازی فوتبال
+FOOTBALL_MIN_BET = 50000
 
 # گردونه شانس
-WHEEL_FREE_INTERVAL = 86400  # ۲۴ ساعت
-WHEEL_EXTRA_COST = 50000  # هزینه چرخش اضافی
+WHEEL_FREE_INTERVAL = 86400
+WHEEL_EXTRA_COST = 50000
 WHEEL_MIN_PRIZE = 5000
 WHEEL_MAX_PRIZE = 100000
+
+# مدت زمان بسته شدن خودکار بازی (ثانیه)
+GAME_TIMEOUT = 600  # ۱۰ دقیقه
 
 LEVEL_REQUIREMENTS = {
     1: 0, 2: 20000, 3: 40000, 4: 80000, 5: 150000,
