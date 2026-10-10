@@ -5915,6 +5915,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     return
 
                 # جایگزینی دیتابیس
+global db
                 try:
                     gc.collect()
                     await asyncio.sleep(1)
@@ -5922,7 +5923,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     await asyncio.sleep(1)
 
                     # ری‌لود دیتابیس
-                    global db
                     db = database.Database()
 
                     final_stats = db.get_stats()
