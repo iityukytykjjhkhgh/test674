@@ -5921,7 +5921,9 @@ global db
                     await asyncio.sleep(1)
                     shutil.move(temp_path, db.db_name)
                     await asyncio.sleep(1)
-
+except Exception as e:
+    await status_msg.edit_text(f"❌ خطا در جایگزینی دیتابیس:\n{str(e)}")
+    return
                     # ری‌لود دیتابیس
                     db = database.Database()
 
