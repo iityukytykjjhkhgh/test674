@@ -7,6 +7,7 @@ SUPPORT_USERNAME = "@kanfingfreesup"
 LOG_CHANNEL_ID = -1004482670552
 LOG_CHANNEL_USERNAME = "@starsdarkconfig"
 
+# Panel API
 PANEL_URL = "https://your-panel-url.com"
 PANEL_API_KEYS = {"snai": "9a80695b6e3fdfdae22ec69dc110b954"}
 PANEL_INBOUND_ID = 32063619
@@ -26,10 +27,12 @@ DEFAULT_REFERRAL_REWARD = 30000
 REFERRAL_REWARD = 30000
 FIRST_JOIN_REWARD = 50000
 
+# بانک: سود 15%
 BANK_OPEN_COST = 20000
 BANK_INTEREST_RATE = 0.15
 BANK_INTEREST_PERIOD = 86400
 
+# کارخونه
 FACTORY_OPEN_COST = 100000
 FACTORY_HOURLY_MAINTENANCE = 80
 FACTORY_LEVELS = {
@@ -44,40 +47,52 @@ MIN_GAME_AMOUNT = 100
 TRANSFER_FEE = 0.10
 MIN_GROUP_MEMBERS = 30
 
-# محدودیت انتقال روزانه
+# محدودیت انتقال
 MAX_DAILY_TRANSFERS = 10
 
-# بازی انفجار
+# بازی‌ها
 CRASH_MIN_BET = 500
 CRASH_MAX_BET = 500000
 CRASH_MAX_MULTIPLIER = 15.0
-
-# بازی تاس
 DICE_MIN_BET = 15000
-
-# بازی حدس بزن
 GUESS_MIN_BET = 30000
-
-# بازی کازینو
 CASINO_MIN_BET = 25000
-
-# بازی بمب (۶ بمب، ضریب ۰.۴)
 BOMB_MIN_BET = 35000
 BOMB_COUNT = 6
 BOMB_MULTIPLIER_STEP = 0.4
-
-# بازی فوتبال
 FOOTBALL_MIN_BET = 50000
 
-# گردونه شانس
+# گردونه
 WHEEL_FREE_INTERVAL = 86400
 WHEEL_EXTRA_COST = 50000
 WHEEL_MIN_PRIZE = 5000
 WHEEL_MAX_PRIZE = 100000
 
-# مدت زمان بسته شدن خودکار بازی (ثانیه)
-GAME_TIMEOUT = 600  # ۱۰ دقیقه
+# مدت بسته شدن خودکار بازی
+GAME_TIMEOUT = 600
 
+# حداقل زیرمجموعه برای خرید پنل
+MIN_REFERRALS_FOR_PANEL = 5
+
+# ============ MINER ============
+MINER_BUY_COST = 5_000_000
+MINER_LEVELS = {
+    1: {"ton_per_hour": 0.01, "usdt_per_hour": 0.03, "upgrade_cost": 20_000_000},
+    2: {"ton_per_hour": 0.03, "usdt_per_hour": 0.05, "upgrade_cost": 100_000_000},
+    3: {"ton_per_hour": 0.04, "usdt_per_hour": 0.07, "upgrade_cost": 300_000_000},
+    4: {"ton_per_hour": 0.06, "usdt_per_hour": 0.09, "upgrade_cost": 500_000_000},
+    5: {"ton_per_hour": 0.09, "usdt_per_hour": 0.12, "upgrade_cost": 0},
+}
+
+MINER_ELECTRICITY_RATE = 2_000_000  # DP برای 1 ساعت
+
+# تبدیل ارز
+TON_TO_DP_RATE = 100_000  # هر 0.01 TON = 100,000 DP
+USDT_TO_DP_RATE = 50_000  # هر 0.01 USDT = 50,000 DP
+MIN_TON_CONVERT = 0.7
+MIN_USDT_CONVERT = 2.0
+
+# سطوح
 LEVEL_REQUIREMENTS = {
     1: 0, 2: 20000, 3: 40000, 4: 80000, 5: 150000,
     6: 200000, 7: 300000, 8: 500000, 9: 800000, 10: 1000000,
