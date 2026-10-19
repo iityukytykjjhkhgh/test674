@@ -1,6726 +1,5586 @@
-# bot.py - Dark Point Bot Ultimate Final Version
-
+# bot.py — Dark Point Bot (قسمت 1/12)
 import os
-import logging
+import sys
 import time
 import random
-import string
+import logging
 import html
-import asyncio
-import json
-import re
+import uuid
 import threading
-import shutil
-import gc
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import asyncio
+from datetime import datetime, date, timedelta
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import requests
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputMediaDocument,
 )
+from telegram.constants import ParseMode, ChatMemberStatus, ChatType
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters, ChatMemberHandler
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    ChatMemberHandler,
+    filters,
 )
-from telegram.constants import ParseMode
+from telegram.error import TelegramError, BadRequest, Forbidden
 
-from config import *
+import config
 import database
 
+# ──────────────── Globals ────────────────
 db = database.Database()
-BOT_USERNAME = ""
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
-
-# ============ HELPERS ============
-
-def format_number(num):
-    return "{:,}".format(int(num))
-
-def format_crypto(amount, decimals=4):
-    """فرمت ارز رمزنگاری"""
-    return f"{amount:.{decimals}f}"
-
-def get_level_title(level):
-    return LEVEL_TITLES.get(level, f"سطح {level}")
-
-def get_dp_range(level):
-    base_min = BASE_MIN_DP + (level - 1) * DP_INCREASE_PER_LEVEL
-    base_max = BASE_MAX_DP + (level - 1) * DP_INCREASE_PER_LEVEL
-    return base_min, base_max
-
-def get_random_cooldown():
-    return random.randint(MIN_COOLDOWN, MAX_COOLDOWN)
-
-def get_next_level_requirement(level):
-    if level >= 20:
-        return None
-    return LEVEL_REQUIREMENTS.get(level + 1, None)
-
-def generate_captcha():
-    num1 = random.randint(1, 15)
-    num2 = random.randint(1, 15)
-    op = random.choice(['+', '-'])
-    if op == '+':
-        answer = num1 + num2
-    else:
-        if num1 < num2:
-            num1, num2 = num2, num1
-        answer = num1 - num2
-    return f"{num1} {op} {num2}", answer
-
-def get_user_display(user):
-    safe_name = html.escape(user.first_name or "کاربر")
-    if user.username:
-        return f"@{user.username}"
-    return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
-
-async def get_user_mention(context, user_id):
-    try:
-        u = await context.bot.get_chat(user_id)
-        if u.username:
-            return f"@{u.username}"
-        name = html.escape(u.first_name or str(user_id))
-        return f'<a href="tg://user?id={user_id}">{name}</a>'
-    except Exception:
-        return f"<code>{user_id}</code>"
-
-def get_referral_reward():
-    return int(db.get_setting('referral_reward', str(DEFAULT_REFERRAL_REWARD)))
-
-def get_first_join_reward():
-    return int(db.get_setting('first_join_reward', str(FIRST_JOIN_REWARD)))
-
-def is_bot_active():
-    return db.get_setting('bot_active', '1') == '1'
-
-async def check_force_join(user_id, context):
-    channels = db.get_force_channels()
-    if not channels:
-        return True, []
-    not_joined = []
-    for ch in channels:
-        try:
-            member = await context.bot.get_chat_member(ch['channel_username'], user_id)
-            if member.status in ['left', 'kicked']:
-                not_joined.append(ch)
-        except Exception:
-            continue
-    return len(not_joined) == 0, not_joined
-
-def get_force_join_keyboard(check_callback="check_join_main"):
-    channels = db.get_force_channels()
-    kb = []
-    for ch in channels:
-        username = ch['channel_username'].replace('@', '')
-        title = ch['channel_title'] or ch['channel_username']
-        kb.append([InlineKeyboardButton(f"📢 {title}", url=f"https://t.me/{username}")])
-    kb.append([InlineKeyboardButton("✅ عضو شدم", callback_data=check_callback)])
-    return InlineKeyboardMarkup(kb)
-
-async def send_log(context, text, reply_markup=None):
-    try:
-        await context.bot.send_message(
-            LOG_CHANNEL_ID, text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        try:
-            await context.bot.send_message(
-                LOG_CHANNEL_USERNAME, text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup
-            )
-        except Exception as e2:
-            logger.error(f"Log channel error: {e} | {e2}")
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-async def check_bot_is_admin_in_group(context, chat_id):
-    try:
-        bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
-        return bot_member.status in ['administrator', 'creator']
-    except Exception:
-        return False
-
-
-# ============ KEEP-ALIVE SERVER ============
-
+# ──────────────── Keep-Alive HTTP Server ────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
-        html_page = f"""
-        <html><head><title>Dark Point Bot</title></head>
-        <body style="background:#000;color:#0f0;text-align:center;font-family:Arial;padding:50px;">
-        <h1>🏴 Dark Point Bot 🏴</h1>
-        <h2>✅ Alive & Running</h2>
-        <p>{time.strftime('%Y-%m-%d %H:%M:%S')}</p>
-        </body></html>"""
-        self.wfile.write(html_page.encode("utf-8"))
+        self.wfile.write(b"Dark Point Bot is alive")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
     def log_message(self, format, *args):
         return
 
-def start_health_server():
-    port = int(os.environ.get("PORT", 8080))
+
+def run_health_server():
     try:
-        server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        logger.info(f"🌐 Health server on port {port}")
+        srv = HTTPServer(("0.0.0.0", config.PORT), HealthHandler)
+        logger.info(f"🌐 Health server on port {config.PORT}")
+        srv.serve_forever()
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
-async def self_ping(context: ContextTypes.DEFAULT_TYPE):
-    url = os.environ.get("RENDER_EXTERNAL_URL")
-    if not url:
+
+def self_ping_loop():
+    while True:
+        time.sleep(480)  # 8 min
+        if config.RENDER_URL:
+            try:
+                requests.get(config.RENDER_URL, timeout=10)
+                logger.info("🔄 Self-ping OK")
+            except Exception as e:
+                logger.warning(f"Self-ping failed: {e}")
+
+
+# ──────────────── Helpers ────────────────
+def fmt(n):
+    """Pretty number format"""
+    try:
+        if isinstance(n, float):
+            if n < 0.0001:
+                return f"{n:.8f}"
+            if n < 0.01:
+                return f"{n:.6f}"
+            if n < 1:
+                return f"{n:.4f}"
+            return f"{n:,.2f}"
+        return f"{int(n):,}"
+    except Exception:
+        return str(n)
+
+
+def dp_to_ton(dp):
+    """Convert DP to TON by the official withdrawal rate"""
+    return (dp / config.TON_WITHDRAWAL_DP_RATE) * config.TON_WITHDRAWAL_TON_AMOUNT
+
+
+def ton_to_dp(ton):
+    """Convert TON amount back to DP cost"""
+    return int((ton / config.TON_WITHDRAWAL_TON_AMOUNT) * config.TON_WITHDRAWAL_DP_RATE)
+
+
+def mask_wallet(addr):
+    """Mask middle of wallet with 6 asterisks"""
+    if not addr:
+        return "******"
+    if len(addr) <= 12:
+        return addr[:3] + "******" + addr[-3:]
+    return addr[:6] + "******" + addr[-6:]
+
+
+def section_off_text():
+    return f"⚠️ {config.SECTION_OFF_MESSAGE}"
+
+
+def bot_off_text():
+    return f"🔧 {config.BOT_OFF_MESSAGE}"
+
+
+def is_admin(uid):
+    return uid == config.ADMIN_ID
+
+
+def gen_tracking_code(prefix="DP"):
+    return f"{prefix}-{uuid.uuid4().hex[:8].upper()}"
+
+
+def seconds_to_hms(s):
+    s = max(0, int(s))
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {sec}s"
+    return f"{sec}s"
+
+
+async def check_force_join(bot, uid):
+    """Return (ok, bad_channels)"""
+    chs = db.get_force_channels()
+    if not chs:
+        return True, []
+    bad = []
+    for ch in chs:
+        try:
+            m = await bot.get_chat_member(ch['channel_id'], uid)
+            if m.status not in (ChatMemberStatus.MEMBER,
+                                ChatMemberStatus.ADMINISTRATOR,
+                                ChatMemberStatus.OWNER):
+                bad.append(ch)
+        except Exception:
+            bad.append(ch)
+    return (len(bad) == 0), bad
+
+
+def force_join_kb(channels):
+    rows = []
+    for ch in channels:
+        u = ch['channel_username'].lstrip('@')
+        rows.append([InlineKeyboardButton(
+            f"📢 عضویت در {ch['channel_username']}",
+            url=f"https://t.me/{u}"
+        )])
+    rows.append([InlineKeyboardButton("✅ عضو شدم", callback_data="check_join")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_log(bot, text, kb=None, photo=None):
+    """Send message to log channel"""
+    try:
+        if photo:
+            await bot.send_photo(
+                config.LOG_CHANNEL, photo, caption=text,
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await bot.send_message(
+                config.LOG_CHANNEL, text,
+                parse_mode=ParseMode.HTML, reply_markup=kb,
+                disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Log channel err: {e}")
+
+
+async def safe_edit(query, text, kb=None):
+    try:
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=kb,
+            disable_web_page_preview=True)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            logger.warning(f"Edit err: {e}")
+    except Exception as e:
+        logger.warning(f"Edit err: {e}")
+
+
+async def safe_send(bot, chat_id, text, kb=None):
+    try:
+        return await bot.send_message(
+            chat_id, text, parse_mode=ParseMode.HTML,
+            reply_markup=kb, disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning(f"Send err to {chat_id}: {e}")
+        return None
+
+
+def clear_user_state(ctx):
+    """Clear all user_data flags used for input flows"""
+    for k in list(ctx.user_data.keys()):
+        if k.startswith(('tw_', 'bank_', 'buy_', 'transfer_',
+                         'admin_', 'shop_', 'task_', 'gift_',
+                         'force_', 'panel_', 'send_', 'addrm_',
+                         'search_', 'ban_', 'reply_', 'guess_',
+                         'bomb_', 'set_', 'edit_')):
+            ctx.user_data.pop(k, None)# bot.py — Dark Point Bot (قسمت 2/12)
+
+# ──────────────── Main Menus ────────────────
+def main_menu_kb():
+    """User main menu — TON withdrawal is FIRST and LARGE"""
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("💎 برداشت TON 💎")],
+        [KeyboardButton("🎁 دریافت جایزه"), KeyboardButton("👤 پروفایل دارکی")],
+        [KeyboardButton("🎮 بازی‌ها"), KeyboardButton("⛏ ماینر دارکی")],
+        [KeyboardButton("🏦 بانک دارکی"), KeyboardButton("🏭 کارخونه دارکی")],
+        [KeyboardButton("🛒 فروشگاه"), KeyboardButton("🎰 گردونه شانس")],
+        [KeyboardButton("💰 خرید DP"), KeyboardButton("⭐ برداشت استارز")],
+        [KeyboardButton("📋 تسک‌ها"), KeyboardButton("👍 چالش لایک")],
+        [KeyboardButton("💱 تبدیل ارز"), KeyboardButton("🎁 هدیه")],
+        [KeyboardButton("📊 لیدربورد"), KeyboardButton("👥 زیرمجموعه‌گیری")],
+        [KeyboardButton("📖 پنل DP"), KeyboardButton("➕ افزودن به گروه")],
+    ], resize_keyboard=True)
+
+
+def admin_menu_kb():
+    """Admin panel menu"""
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("📊 آمار ربات"), KeyboardButton("💎 آمار برداشت TON")],
+        [KeyboardButton("⛏ آمار ماینینگ"), KeyboardButton("💱 آمار ارز")],
+        [KeyboardButton("📢 ارسال همگانی"), KeyboardButton("📣 ارسال به گروه‌ها")],
+        [KeyboardButton("💰 افزودن DP"), KeyboardButton("➖ کسر DP")],
+        [KeyboardButton("🔍 جستجوی کاربر"), KeyboardButton("👤 ارسال به کاربر")],
+        [KeyboardButton("🚫 بن کاربر"), KeyboardButton("✅ آنبان")],
+        [KeyboardButton("📢 فورس جوین"), KeyboardButton("📋 گروه‌های من")],
+        [KeyboardButton("📋 مدیریت تسک‌ها"), KeyboardButton("✅ تایید ماموریت")],
+        [KeyboardButton("🛒 مدیریت فروشگاه"), KeyboardButton("🎁 مدیریت هدایا")],
+        [KeyboardButton("💰 تنظیم خرید DP"), KeyboardButton("⭐ تنظیم استارز")],
+        [KeyboardButton("📦 پلن‌های پنل"), KeyboardButton("🏷 پاداش رفرال")],
+        [KeyboardButton("⚙️ روشن/خاموش بخش‌ها"), KeyboardButton("🔌 ربات روشن/خاموش")],
+        [KeyboardButton("💾 بکاپ"), KeyboardButton("♻️ ریستور")],
+        [KeyboardButton("🎁 هدیه به برترین‌ها"), KeyboardButton("🎁 هدیه به همه")],
+        [KeyboardButton("💬 پاسخ به کاربر"), KeyboardButton("📜 سفارش‌های اخیر")],
+        [KeyboardButton("🔙 بازگشت به منو")],
+    ], resize_keyboard=True)
+
+
+def games_inline_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💥 کرش", callback_data="g_crash_info"),
+         InlineKeyboardButton("🎲 تاس", callback_data="g_dice_info")],
+        [InlineKeyboardButton("🔮 حدس بزن", callback_data="g_guess_info"),
+         InlineKeyboardButton("🎰 کازینو", callback_data="g_casino_info")],
+        [InlineKeyboardButton("💣 بمب", callback_data="g_bomb_info")],
+    ])
+
+
+def sections_toggle_kb():
+    """Admin section toggle keyboard"""
+    sections = [
+        ("ton_withdraw", "💎 برداشت TON"),
+        ("claim", "🎁 دریافت جایزه"),
+        ("games", "🎮 بازی‌ها"),
+        ("miner", "⛏ ماینر"),
+        ("bank", "🏦 بانک"),
+        ("shop", "🛒 فروشگاه"),
+        ("gift", "🎁 هدیه"),
+        ("stars", "⭐ استارز"),
+        ("buy_dp", "💰 خرید DP"),
+        ("tasks", "📋 تسک‌ها"),
+        ("like", "👍 چالش لایک"),
+        ("wheel", "🎰 گردونه"),
+        ("convert", "💱 تبدیل ارز"),
+        ("leaderboard", "📊 لیدربورد"),
+        ("factory", "🏭 کارخانه"),
+    ]
+    rows = []
+    for key, name in sections:
+        state = "🟢" if db.is_section_on(key) else "🔴"
+        rows.append([InlineKeyboardButton(
+            f"{state} {name}", callback_data=f"toggle_sec_{key}")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+# ──────────────── /start Command ────────────────
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        # group /start: just greet
+        await update.message.reply_text(
+            "👋 سلام! برای استفاده از ربات به چت خصوصی مراجعه کنید.\n"
+            f"@{(await ctx.bot.get_me()).username}")
+        return
+
+    user = update.effective_user
+    uid = user.id
+
+    # Bot off check
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text())
+        return
+
+    # Ban check
+    if db.is_banned(uid):
+        await update.message.reply_text("🚫 شما از ربات بن شده‌اید.")
+        return
+
+    # Referral parse
+    ref_by = 0
+    if ctx.args:
+        try:
+            ref_by = int(ctx.args[0])
+            if ref_by == uid:
+                ref_by = 0
+        except Exception:
+            ref_by = 0
+
+    # Create user if not exists
+    existing = db.get_user(uid)
+    is_new = existing is None
+    db.create_user(uid, user.username or "", user.first_name or "", ref_by)
+    db.update_username(uid, user.username or "", user.first_name or "")
+
+    # First-join reward (only if new)
+    if is_new:
+        reward = int(db.get_setting('first_join_reward', config.DEFAULT_FIRST_JOIN_REWARD))
+        if reward > 0 and ref_by == 0:
+            db.add_balance(uid, reward)
+
+    # Clear any stale flow state
+    clear_user_state(ctx)
+
+    # Force join check
+    ok, bad = await check_force_join(ctx.bot, uid)
+    if not ok:
+        await update.message.reply_text(
+            "⚠️ <b>برای استفاده از ربات ابتدا در کانال‌های زیر عضو شوید:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=force_join_kb(bad))
+        return
+
+    await send_welcome(ctx.bot, uid, user.first_name or "")
+
+
+async def send_welcome(bot, uid, fname):
+    """Send welcome message with main menu"""
+    bal = db.get_balance(uid)
+    lvl = db.get_user_level(uid)
+    ton_eq = dp_to_ton(bal)
+    text = (
+        f"👋 سلام <b>{html.escape(fname)}</b> عزیز!\n\n"
+        f"🎊 به <b>Dark Point Bot</b> خوش آمدید\n\n"
+        f"💎 موجودی شما: <b>{fmt(bal)}</b> DP\n"
+        f"💰 معادل: <b>{ton_eq:.6f}</b> TON\n"
+        f"📊 سطح: <b>{lvl}</b> / 20\n\n"
+        f"از منوی زیر گزینه مورد نظر را انتخاب کنید 👇"
+    )
+    await bot.send_message(uid, text, parse_mode=ParseMode.HTML,
+                           reply_markup=main_menu_kb())
+
+
+# ──────────────── Check Join Callback ────────────────
+async def cb_check_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    ok, bad = await check_force_join(ctx.bot, uid)
+    if not ok:
+        try:
+            await q.edit_message_text(
+                "❌ هنوز در همه کانال‌ها عضو نشده‌اید!",
+                reply_markup=force_join_kb(bad))
+        except Exception:
+            pass
         return
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'DarkBot'})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            if r.status == 200:
-                logger.info("🟢 Self-ping OK")
+        await q.edit_message_text("✅ عضویت تایید شد!")
     except Exception:
         pass
+    await send_welcome(ctx.bot, uid, q.from_user.first_name or "")
 
 
-# ============ START COMMAND ============
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
+# ──────────────── Admin Panel Entry ────────────────
+async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
         return
-
-    if db.is_banned(user.id):
-        await update.message.reply_text("❌ حساب شما مسدود شده است.")
+    if update.effective_chat.type != ChatType.PRIVATE:
         return
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        "⚙️ <b>پنل مدیریت</b>\n\nگزینه مورد نظر را انتخاب کنید:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_menu_kb())
 
-    if not is_bot_active() and not is_admin(user.id):
-        await update.message.reply_text(
-            "⚠️ <b>ربات موقتاً خاموش است</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            "🔧 ربات از طرف پشتیبانی موقتاً غیرفعال شده است.\n"
-            "لطفاً بعداً مجدداً تلاش کنید.",
-            parse_mode=ParseMode.HTML
-        )
+
+async def msg_back_to_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        "🔙 بازگشت به منوی اصلی",
+        reply_markup=main_menu_kb())
+
+
+# ──────────────── /help ────────────────
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
         return
+    text = (
+        "📖 <b>راهنمای Dark Point Bot</b>\n\n"
+        "💎 <b>برداشت TON:</b> تبدیل DP به TON و برداشت به کیف‌پول Keeper\n"
+        "🎁 <b>دریافت جایزه:</b> هر ۳-۵ دقیقه DP رایگان بگیرید\n"
+        "🎮 <b>بازی‌ها:</b> کرش، تاس، حدس، کازینو، بمب\n"
+        "⛏ <b>ماینر:</b> استخراج TON یا USDT\n"
+        "🏦 <b>بانک:</b> ۳٪ سود هر ۴۸ ساعت\n"
+        "🛒 <b>فروشگاه:</b> خرید پلن و محصولات\n"
+        "👥 <b>زیرمجموعه‌گیری:</b> با دعوت دوستان DP بگیرید\n\n"
+        "📝 <b>دستورات گروه:</b>\n"
+        "• دارک / دارک کانفیگ\n"
+        "• موجودی\n"
+        "• پروفایل دارکی\n"
+        "• بازی [مبلغ] (کرش)\n"
+        "• انفجار [مبلغ]\n"
+        "• تاس [مبلغ]\n"
+        "• حدس بزن\n"
+        "• کازینو\n"
+        "• بمب\n"
+        "• انتقال [مبلغ]\n"
+        "• بانک دارکی\n"
+        "• ماینر دارکی\n"
+        "• لیدربورد\n"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)# bot.py — Dark Point Bot (قسمت 3/12)
 
-    args = context.args
-    existing = db.get_user(user.id)
-    is_new_user = not existing
-
-    if is_new_user:
-        ref_id = 0
-        if args and len(args) > 0 and args[0].startswith("ref_"):
-            try:
-                ref_id = int(args[0].replace("ref_", ""))
-                if ref_id == user.id:
-                    ref_id = 0
-            except Exception:
-                ref_id = 0
-
-        db.create_user(user.id, user.username or "", user.first_name or "", ref_id)
-
-        if ref_id > 0:
-            context.user_data['pending_ref'] = ref_id
-            q_text, ans = generate_captcha()
-            context.user_data['captcha_ans'] = ans
-
-            await update.message.reply_text(
-                f"🔐 <b>تایید هویت امنیتی</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-                f"شما توسط لینک زیرمجموعه‌گیری وارد شده‌اید.\n"
-                f"برای تایید، پاسخ سوال زیر را ارسال کنید:\n\n"
-                f"❓ <code>{q_text}</code> = ?\n\n"
-                f"💡 فقط عدد پاسخ را بفرستید.",
-                parse_mode=ParseMode.HTML
-            )
-            return
-
-    db.update_last_active(user.id)
-
-    # چک کد
-    if args and len(args) > 0 and args[0].startswith("check_"):
-        code = args[0].replace("check_", "")
-        amount = db.claim_check(code, user.id)
-        if amount:
-            db.add_dark_points(user.id, amount)
-            await update.message.reply_text(
-                f"🎁 <b>چک شخصی فعال شد!</b>\n\n"
-                f"💰 مبلغ: <code>{format_number(amount)}</code> DP",
-                parse_mode=ParseMode.HTML
-            )
-            for admin_id in ADMIN_IDS:
-                try:
-                    await context.bot.send_message(
-                        admin_id,
-                        f"📋 چک فعال\n👤 <code>{user.id}</code>\n💰 <code>{format_number(amount)}</code>",
-                        parse_mode=ParseMode.HTML
-                    )
-                except Exception:
-                    pass
-            return
-        else:
-            await update.message.reply_text("❌ چک نامعتبر یا استفاده شده است.")
-            return
-
-    # جوین اجباری
-    joined, not_joined = await check_force_join(user.id, context)
-    if not joined:
-        await update.message.reply_text(
-            f"📢 <b>عضویت اجباری در کانال‌ها</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"برای استفاده از ربات، در کانال‌های زیر عضو شوید:\n\n"
-            f"💡 <i>روی هر کانال کلیک کنید</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_force_join_keyboard("check_join_main")
-        )
+# ──────────────── Profile ────────────────
+async def msg_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
         return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
 
-    # هدیه ثبت‌نام
-    u = db.get_user(user.id)
-    if u and not u['first_reward_claimed']:
-        reward = db.claim_first_reward(user.id)
-        if reward:
-            await update.message.reply_text(
-                f"🎉 🎊 <b>خوش‌آمدید به دنیای دارک پوینت!</b> 🎊 🎉\n"
-                f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"🎁 <b>هدیه ثبت‌نام شما:</b>\n"
-                f"💰 +<code>{format_number(reward)}</code> دارک پوینت\n\n"
-                f"✅ به کیف پول شما اضافه شد!",
-                parse_mode=ParseMode.HTML
-            )
-            await asyncio.sleep(1)
+    u = db.get_user(uid)
+    if not u:
+        await update.message.reply_text("❌ کاربر یافت نشد"); return
 
-    await show_main_menu(update, context)
+    bal = u['balance']
+    lvl = db.get_user_level(uid)
+    ton_eq = dp_to_ton(bal)
+    ref_reward = int(db.get_setting('referral_reward', config.DEFAULT_REFERRAL_REWARD))
+    ref_link = f"https://t.me/{(await ctx.bot.get_me()).username}?start={uid}"
 
-
-async def show_main_menu(update, context, query=None):
-    user = update.effective_user
-    db_user = db.get_user(user.id)
-    if not db_user:
-        db.create_user(user.id, user.username or "", user.first_name or "")
-        db_user = db.get_user(user.id)
-
-    db.update_last_active(user.id)
-    balance = db_user['dark_points']
-    level = db_user['level']
-    title = get_level_title(level)
-    safe_name = html.escape(user.first_name or "کاربر")
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    keyboard = [
-        [InlineKeyboardButton("⭐️ 🌟 برداشت استارز 🌟 ⭐️", callback_data="stars_withdraw")],
-        [
-            InlineKeyboardButton("🏴 دارک پوینت", callback_data="dark_point_menu"),
-            InlineKeyboardButton("🛒 خرید پنل", callback_data="buy_panel"),
-        ],
-        [
-            InlineKeyboardButton("💱 تبدیل ارز", callback_data="convert_menu"),
-            InlineKeyboardButton("🛍 فروشگاه", callback_data="shop_menu"),
-        ],
-        [
-            InlineKeyboardButton("🎁 گیفت رایگان", callback_data="free_gift"),
-            InlineKeyboardButton("💰 خرید دارک پوینت", callback_data="buy_dp"),
-        ],
-        [
-            InlineKeyboardButton("📋 انجام تسک", callback_data="tasks_menu"),
-            InlineKeyboardButton("❤️ چالش لایکی", callback_data="like_challenge"),
-        ],
-        [
-            InlineKeyboardButton("👥 زیرمجموعه‌گیری", callback_data="referral_menu"),
-            InlineKeyboardButton("🏆 لیدربورد", callback_data="leaderboard"),
-        ],
-        [InlineKeyboardButton("➕ افزودن به گروه", url=f"https://t.me/{BOT_USERNAME}?startgroup=true")],
-    ]
-
-    if is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("🛡 پنل ادمین 🛡", callback_data="adm_back")])
+    # Level progress
+    next_lvl = min(lvl + 1, 20)
+    if lvl < 20:
+        cur_thresh = config.LEVEL_THRESHOLDS[lvl - 1]
+        nxt_thresh = config.LEVEL_THRESHOLDS[lvl]
+        progress = min(100, int((bal - cur_thresh) / max(1, nxt_thresh - cur_thresh) * 100))
+        bar = "█" * (progress // 10) + "░" * (10 - progress // 10)
+        lvl_text = f"📊 سطح: <b>{lvl}</b> / 20\n{bar} {progress}%\n🎯 تا سطح بعدی: <b>{fmt(nxt_thresh - bal)}</b> DP"
+    else:
+        lvl_text = "📊 سطح: <b>20 (MAX)</b> 🏆"
 
     text = (
-        f"🏴 <b>به دنیای دارک پوینت خوش آمدید!</b> 🏴\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 نام: <b>{safe_name}</b>\n"
-        f"🆔 شناسه: <code>{user.id}</code>\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code> DP\n"
-        f"📊 سطح: {level} | {title}\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"⭐ <i>هر ۱ میلیون DP = ۵۰ استارز رایگان!</i>\n\n"
-        f"🎮 <b>بازی‌های گروهی:</b>\n"
-        f"💥 انفجار | 🎲 تاس | 🎯 حدس بزن\n"
-        f"🎰 کازینو | 💣 بمب | ⚽ فوتبال\n"
-        f"⚒ ماینر دارکی"
+        f"👤 <b>پروفایل دارکی</b>\n"
+        f"{'─' * 28}\n\n"
+        f"🆔 آیدی عددی: <code>{uid}</code>\n"
+        f"👤 نام: {html.escape(u['first_name'] or '—')}\n"
+        f"🔖 یوزرنیم: @{html.escape(u['username'] or '—')}\n\n"
+        f"💎 موجودی: <b>{fmt(bal)}</b> DP\n"
+        f"💰 معادل TON: <b>{ton_eq:.6f}</b> TON\n"
+        f"🏆 کل درآمد: <b>{fmt(u['total_earned'])}</b> DP\n\n"
+        f"{lvl_text}\n\n"
+        f"👥 زیرمجموعه: <b>{u['referrals']}</b> نفر\n"
+        f"💵 پاداش هر رفرال: <b>{fmt(ref_reward)}</b> DP\n\n"
+        f"🔗 <b>لینک دعوت شما:</b>\n<code>{ref_link}</code>"
     )
-
-    if query:
-        try:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-        except Exception:
-            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def check_join_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    joined, not_joined = await check_force_join(user.id, context)
-    if not joined:
-        not_joined_list = "\n".join([f"❌ {ch['channel_username']}" for ch in not_joined])
-        await query.answer(
-            f"❌ هنوز عضو همه کانال‌ها نیستی!\n\nعضو نشده‌ها:\n{not_joined_list}",
-            show_alert=True
-        )
+# ──────────────── Claim (دریافت جایزه) ────────────────
+async def msg_claim(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('claim') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    ok, rem = db.can_claim(uid)
+    if not ok:
+        await update.message.reply_text(
+            f"⏳ <b>هنوز زمان دریافت نرسیده!</b>\n\n"
+            f"⏱ باقی‌مانده: <b>{seconds_to_hms(rem)}</b>\n"
+            f"💡 هر ۳ تا ۵ دقیقه می‌توانید جایزه بگیرید.",
+            parse_mode=ParseMode.HTML)
         return
 
-    u = db.get_user(user.id)
-    if u and not u['first_reward_claimed']:
-        reward = db.claim_first_reward(user.id)
-        if reward:
-            try:
-                await context.bot.send_message(
-                    user.id,
-                    f"🎉 خوش‌آمدید!\n🎁 +<code>{format_number(reward)}</code> DP",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
+    amt = db.do_claim(uid)
+    lu = db.check_level_up(uid)
 
-    await show_main_menu(update, context, query=query)
+    text = f"🎉 <b>تبریک!</b>\n\n💎 <b>{fmt(amt)}</b> DP دریافت کردید!"
 
-
-async def check_join_ref_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-
-    joined, not_joined = await check_force_join(user.id, context)
-    if not joined:
-        not_joined_list = "\n".join([f"❌ {ch['channel_username']}" for ch in not_joined])
-        await query.answer(
-            f"❌ هنوز عضو همه کانال‌ها نیستی!\n\nعضو نشده‌ها:\n{not_joined_list}",
-            show_alert=True
+    if lu:
+        old_lvl, new_lvl = lu
+        reward = config.get_level_reward(new_lvl)
+        text += (
+            f"\n\n🚀 <b>ارتقای سطح!</b>\n"
+            f"📊 سطح {old_lvl} ➜ <b>{new_lvl}</b>\n"
+            f"🎁 پاداش ارتقا: <b>+{fmt(reward)}</b> DP"
         )
+
+    bal = db.get_balance(uid)
+    text += f"\n\n💰 موجودی فعلی: <b>{fmt(bal)}</b> DP"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ──────────────── Referral (زیرمجموعه‌گیری) ────────────────
+async def msg_referral(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+
+    u = db.get_user(uid)
+    if not u:
         return
 
-    referrer_id = context.user_data.get('pending_ref', 0)
-    if referrer_id > 0:
-        db.add_referral(referrer_id)
-        ref_reward = get_referral_reward()
-        db.add_dark_points(referrer_id, ref_reward)
-        try:
-            await context.bot.send_message(
-                referrer_id,
-                f"🎉 <b>زیرمجموعه جدید!</b>\n💰 +{format_number(ref_reward)} DP!",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            pass
-
-    context.user_data.pop('captcha_ans', None)
-    context.user_data.pop('pending_ref', None)
-
-    u = db.get_user(user.id)
-    if u and not u['first_reward_claimed']:
-        reward = db.claim_first_reward(user.id)
-        if reward:
-            try:
-                await context.bot.send_message(
-                    user.id,
-                    f"🎉 خوش‌آمدید!\n🎁 +<code>{format_number(reward)}</code> DP",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-
-    await show_main_menu(update, context, query=query)# ============ DARK POINT MENU ============
-
-async def dark_point_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = db.get_user(query.from_user.id)
-    balance = user['dark_points'] if user else 0
-    level = user['level'] if user else 1
-    title = get_level_title(level)
-    next_req = get_next_level_requirement(level)
-    needed = max(0, (next_req or 0) - (user['total_earned'] if user else 0))
-
-    keyboard = [
-        [InlineKeyboardButton("🎡 گردونه شانس", callback_data="wheel_menu")],
-        [InlineKeyboardButton("📖 توضیحات کامل دارک پوینت", callback_data="dp_info_1")],
-        [InlineKeyboardButton("🔗 لینک زیرمجموعه‌گیری", callback_data="referral_menu")],
-        [InlineKeyboardButton("🏆 لیدربورد", callback_data="leaderboard")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
-    ]
+    ref_reward = int(db.get_setting('referral_reward', config.DEFAULT_REFERRAL_REWARD))
+    first_reward = int(db.get_setting('first_join_reward', config.DEFAULT_FIRST_JOIN_REWARD))
+    bot_user = await ctx.bot.get_me()
+    ref_link = f"https://t.me/{bot_user.username}?start={uid}"
 
     text = (
-        f"🏴 <b>پنل دارک پوینت</b> 🏴\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code> DP\n"
-        f"📊 سطح: {level} | {title}\n"
+        f"👥 <b>سیستم زیرمجموعه‌گیری</b>\n"
+        f"{'─' * 28}\n\n"
+        f"👤 تعداد زیرمجموعه: <b>{u['referrals']}</b> نفر\n"
+        f"💵 پاداش هر رفرال: <b>{fmt(ref_reward)}</b> DP\n"
+        f"🎁 پاداش ورود جدید: <b>{fmt(first_reward)}</b> DP\n\n"
+        f"💡 با زیرمجموعه‌گیری راحت می‌توانید برداشت کنید!\n\n"
+        f"🔗 <b>لینک اختصاصی شما:</b>\n<code>{ref_link}</code>\n\n"
+        f"📤 این لینک را برای دوستانتان بفرستید و DP رایگان بگیرید!"
     )
-    if next_req:
-        text += f"📈 تا سطح بعد: <code>{format_number(needed)}</code> DP\n"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 اشتراک لینک", url=f"https://t.me/share/url?url={ref_link}&text=بیا تو Dark Point Bot DP رایگان بگیر!")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+# ──────────────── Leaderboard ────────────────
+async def msg_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('leaderboard') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    top = db.get_top_users(15)
+    if not top:
+        await update.message.reply_text("📊 هنوز کاربری ثبت نشده."); return
+
+    medals = ["🥇", "🥈", "🥉"]
+    text = "🏆 <b>لیدربورد Dark Point</b>\n" + "─" * 28 + "\n\n"
+
+    for i, u in enumerate(top):
+        rank = medals[i] if i < 3 else f"  {i + 1}."
+        name = html.escape(u['username'] or u['first_name'] or str(u['user_id']))
+        if u['username']:
+            name = f"@{name}"
+        text += f"{rank} {name} — <b>{fmt(u['balance'])}</b> DP\n"
+
+    # User's own rank
+    all_users = db.get_top_users(999999)
+    user_rank = next((i + 1 for i, u in enumerate(all_users) if u['user_id'] == uid), "—")
+    user_bal = db.get_balance(uid)
+    text += (
+        f"\n{'─' * 28}\n"
+        f"📍 رتبه شما: <b>{user_rank}</b>\n"
+        f"💎 موجودی شما: <b>{fmt(user_bal)}</b> DP"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ──────────────── Wheel of Fortune (گردونه شانس) ────────────────
+async def msg_wheel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('wheel') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    # Daily reset check
+    today = date.today().isoformat()
+    u = db.get_user(uid)
+    if u and u['wheel_reset_date'] != today:
+        c = db.conn.cursor()
+        c.execute('UPDATE users SET wheel_used_today=0, wheel_reset_date=? WHERE user_id=?', (today, uid))
+        db.conn.commit()
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎰 چرخش رایگان روزانه", callback_data="wheel_free")],
+        [InlineKeyboardButton(f"🎰 چرخش اضافی ({fmt(config.WHEEL_EXTRA_COST)} DP)", callback_data="wheel_extra")],
+    ])
+
+    await update.message.reply_text(
+        "🎰 <b>گردونه شانس</b>\n"
+        f"{'─' * 28}\n\n"
+        f"🎁 هر روز یک چرخش رایگان!\n"
+        f"💰 جوایز: {fmt(config.WHEEL_FREE_MIN)} تا {fmt(config.WHEEL_FREE_MAX)} DP\n\n"
+        f"🔄 چرخش اضافی: {fmt(config.WHEEL_EXTRA_COST)} DP\n"
+        f"💡 جوایز چرخش اضافی بیشتر است!",
+        parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_wheel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    if q.data == "wheel_free":
+        today = date.today().isoformat()
+        u = db.get_user(uid)
+        if u and u['wheel_reset_date'] != today:
+            c = db.conn.cursor()
+            c.execute('UPDATE users SET wheel_used_today=0, wheel_reset_date=? WHERE user_id=?', (today, uid))
+            db.conn.commit()
+            u = db.get_user(uid)
+
+        if u and u['wheel_used_today'] >= 1:
+            await q.edit_message_text("⏳ چرخش رایگان امروز را استفاده کرده‌اید.\nفردا دوباره بیایید!")
+            return
+
+        prize = random.randint(config.WHEEL_FREE_MIN, config.WHEEL_FREE_MAX)
+        db.add_balance(uid, prize)
+        c = db.conn.cursor()
+        c.execute('UPDATE users SET wheel_used_today=wheel_used_today+1 WHERE user_id=?', (uid,))
+        db.conn.commit()
+        db.check_level_up(uid)
+
+        await q.edit_message_text(
+            f"🎰 <b>گردونه چرخید!</b>\n\n"
+            f"🎉 تبریک! <b>{fmt(prize)}</b> DP برنده شدید!\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)
+
+    elif q.data == "wheel_extra":
+        if not db.deduct_balance(uid, config.WHEEL_EXTRA_COST):
+            await q.edit_message_text("❌ موجودی کافی نیست!")
+            return
+
+        # Extra spin has higher prizes
+        prize = random.randint(config.WHEEL_FREE_MAX, config.WHEEL_FREE_MAX * 3)
+        db.add_balance(uid, prize)
+        db.check_level_up(uid)
+
+        await q.edit_message_text(
+            f"🎰 <b>چرخش اضافی!</b>\n\n"
+            f"🎉 تبریک! <b>{fmt(prize)}</b> DP برنده شدید!\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)# bot.py — Dark Point Bot (قسمت 4/12)
+
+# ══════════════════════════════════════════════
+#                  GAMES
+# ══════════════════════════════════════════════
+
+def _game_section_check(uid):
+    """Return True if games section is on or user is admin"""
+    return db.is_section_on('games') or is_admin(uid)
+
+
+# ──────────────── Games Menu (inline) ────────────────
+async def msg_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not _game_section_check(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    text = (
+        "🎮 <b>بازی‌های Dark Point</b>\n"
+        f"{'─' * 28}\n\n"
+        "💥 <b>کرش:</b> 500 – 500,000 DP | ضرایب 2x/3x/5x\n"
+        "🎲 <b>تاس:</b> 15,000+ DP | ضرایب 1.5x/3x/6x\n"
+        "🔮 <b>حدس بزن:</b> 30,000+ DP | ضرایب تا 10x\n"
+        "🎰 <b>کازینو:</b> 25,000+ DP | ضرایب 7x/12x/15x\n"
+        "💣 <b>بمب:</b> 35,000+ DP | +0.2x هر خانه امن\n\n"
+        "⚠️ <b>همه بازی‌ها فقط در گروه قابل اجرا هستند!</b>\n"
+        "دستور بازی را در گروه بفرستید."
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=games_inline_kb())
+
+
+async def cb_game_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    infos = {
+        "g_crash_info": (
+            "💥 <b>بازی کرش</b>\n\n"
+            "📝 دستور: <code>بازی [مبلغ]</code>\n"
+            f"💰 حداقل: {fmt(config.CRASH_MIN_BET)} | حداکثر: {fmt(config.CRASH_MAX_BET)}\n"
+            "🎰 ضرایب: 2x | 3x | 5x\n"
+            "⚠️ فقط در گروه"
+        ),
+        "g_dice_info": (
+            "🎲 <b>بازی تاس</b>\n\n"
+            "📝 دستور: <code>تاس [مبلغ]</code>\n"
+            f"💰 حداقل: {fmt(config.DICE_MIN_BET)}\n"
+            "🎯 تاس 6 = 6x | تاس 5 = 3x | تاس 4 = 1.5x\n"
+            "⚠️ فقط در گروه"
+        ),
+        "g_guess_info": (
+            "🔮 <b>بازی حدس بزن</b>\n\n"
+            "📝 دستور: <code>حدس بزن [مبلغ]</code>\n"
+            f"💰 حداقل: {fmt(config.GUESS_MIN_BET)}\n"
+            "🎯 ضرایب: 10x | 5x | 2.5x | 1.2x\n"
+            "⚠️ فقط در گروه"
+        ),
+        "g_casino_info": (
+            "🎰 <b>بازی کازینو</b>\n\n"
+            "📝 دستور: <code>کازینو [مبلغ]</code>\n"
+            f"💰 حداقل: {fmt(config.CASINO_MIN_BET)}\n"
+            "🎰 ضرایب: 7x | 12x | 15x\n"
+            "⚠️ فقط در گروه"
+        ),
+        "g_bomb_info": (
+            "💣 <b>بازی بمب</b>\n\n"
+            "📝 دستور: <code>بمب [مبلغ]</code>\n"
+            f"💰 حداقل: {fmt(config.BOMB_MIN_BET)}\n"
+            "🔲 گرید 4×4 | 6 بمب | 10 خانه امن\n"
+            "📈 هر خانه امن: +0.2x ضریب\n"
+            "⚠️ فقط در گروه"
+        ),
+    }
+    text = infos.get(q.data, "❌ نامعتبر")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 بازگشت به بازی‌ها", callback_data="games_back")]
+    ])
+    await safe_edit(q, text, kb)
+
+
+async def cb_games_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    text = (
+        "🎮 <b>بازی‌های Dark Point</b>\n\n"
+        "⚠️ همه بازی‌ها فقط در گروه قابل اجرا هستند.\n"
+        "دستور بازی را در گروه بفرستید."
+    )
+    await safe_edit(q, text, games_inline_kb())
+
+
+# ──────────────── Helper: Parse Bet ────────────────
+async def _parse_bet(update, ctx, min_bet, max_bet=None):
+    """Parse bet from command args. Returns (bet, True) or (None, False)."""
+    uid = update.effective_user.id
+    if not _game_section_check(uid):
+        await update.message.reply_text(section_off_text())
+        return None, False
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text())
+        return None, False
+
+    parts = (update.message.text or "").strip().split()
+    if len(parts) < 2:
+        await update.message.reply_text(
+            f"❌ مبلغ شرط را وارد کنید!\n"
+            f"مثال: <code>{parts[0]} {fmt(min_bet)}</code>\n"
+            f"حداقل: {fmt(min_bet)}"
+            + (f" | حداکثر: {fmt(max_bet)}" if max_bet else ""),
+            parse_mode=ParseMode.HTML)
+        return None, False
+
+    try:
+        bet = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ مبلغ نامعتبر! فقط عدد وارد کنید.")
+        return None, False
+
+    if bet < min_bet:
+        await update.message.reply_text(f"❌ حداقل شرط: <b>{fmt(min_bet)}</b> DP",
+                                        parse_mode=ParseMode.HTML)
+        return None, False
+    if max_bet and bet > max_bet:
+        await update.message.reply_text(f"❌ حداکثر شرط: <b>{fmt(max_bet)}</b> DP",
+                                        parse_mode=ParseMode.HTML)
+        return None, False
+    if not db.deduct_balance(uid, bet):
+        await update.message.reply_text("❌ موجودی کافی نیست!")
+        return None, False
+
+    return bet, True
+
+
+# ══════════════════════════════════════════════
+#           1) CRASH  (💥 کرش — 🎰 dice)
+# ══════════════════════════════════════════════
+async def cmd_crash(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.message.reply_text("⚠️ این بازی فقط در <b>گروه</b> قابل اجراست!",
+                                        parse_mode=ParseMode.HTML)
+        return
+
+    bet, ok = await _parse_bet(update, ctx, config.CRASH_MIN_BET, config.CRASH_MAX_BET)
+    if not ok:
+        return
+
+    uid = update.effective_user.id
+    uname = html.escape(update.effective_user.first_name or "بازیکن")
+
+    # Send spinning dice
+    status_msg = await update.message.reply_text(
+        f"💥 <b>کرش شروع شد!</b>\n"
+        f"👤 {uname}\n"
+        f"💰 شرط: <b>{fmt(bet)}</b> DP\n\n"
+        f"⏳ در حال چرخش...",
+        parse_mode=ParseMode.HTML)
+
+    dice_msg = await ctx.bot.send_dice(update.effective_chat.id, emoji='🎰')
+    val = dice_msg.dice.value
+
+    # 🎰 values: 1=bar(lose), 22=grape(2x), 43=lemon(3x), 64=seven(5x)
+    mult_map = {1: 0, 22: 2, 43: 3, 64: 5}
+    mult = mult_map.get(val, 0)
+
+    if mult > 0:
+        win = bet * mult
+        db.add_balance(uid, win)
+        db.check_level_up(uid)
+        await status_msg.edit_text(
+            f"💥 <b>کرش!</b>\n"
+            f"👤 {uname}\n"
+            f"🎰 ضریب: <b>{mult}x</b>\n"
+            f"🎉 برنده: <b>+{fmt(win)}</b> DP\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)
     else:
-        text += f"🏆 بالاترین سطح!\n"
+        await status_msg.edit_text(
+            f"💥 <b>کرش!</b>\n"
+            f"👤 {uname}\n"
+            f"💀 باختید: <b>-{fmt(bet)}</b> DP\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)
+
+
+# ══════════════════════════════════════════════
+#           2) DICE  (🎲 تاس)
+# ══════════════════════════════════════════════
+async def cmd_dice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.message.reply_text("⚠️ فقط در <b>گروه</b>!", parse_mode=ParseMode.HTML)
+        return
+
+    bet, ok = await _parse_bet(update, ctx, config.DICE_MIN_BET)
+    if not ok:
+        return
+
+    uid = update.effective_user.id
+    uname = html.escape(update.effective_user.first_name or "بازیکن")
+
+    dice_msg = await ctx.bot.send_dice(update.effective_chat.id, emoji='🎲')
+    val = dice_msg.dice.value  # 1-6
+
+    # 6 → 6x, 5 → 3x, 4 → 1.5x, else lose
+    if val == 6:
+        mult = 6
+    elif val == 5:
+        mult = 3
+    elif val == 4:
+        mult = 1.5
+    else:
+        mult = 0
+
+    if mult > 0:
+        win = int(bet * mult)
+        db.add_balance(uid, win)
+        db.check_level_up(uid)
+        await update.message.reply_text(
+            f"🎲 <b>تاس: {val}</b>\n"
+            f"👤 {uname}\n"
+            f"🎉 ضریب: <b>{mult}x</b> — برنده: <b>+{fmt(win)}</b> DP",
+            parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(
+            f"🎲 <b>تاس: {val}</b>\n"
+            f"👤 {uname}\n"
+            f"💀 باختید: <b>-{fmt(bet)}</b> DP",
+            parse_mode=ParseMode.HTML)
+
+
+# ══════════════════════════════════════════════
+#        3) GUESS  (🔮 حدس بزن — 10x/5x/2.5x/1.2x)
+# ══════════════════════════════════════════════
+async def cmd_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.message.reply_text("⚠️ فقط در <b>گروه</b>!", parse_mode=ParseMode.HTML)
+        return
+
+    bet, ok = await _parse_bet(update, ctx, config.GUESS_MIN_BET)
+    if not ok:
+        return
+
+    uid = update.effective_user.id
+
+    # Store bet in user_data for callback
+    ctx.user_data['guess_bet'] = bet
+    ctx.user_data['guess_uid'] = uid
+    ctx.user_data['guess_time'] = time.time()
+
+    # Assign random multipliers to 4 positions
+    mults = [10, 5, 2.5, 1.2]
+    random.shuffle(mults)
+    ctx.user_data['guess_mults'] = mults
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("1️⃣", callback_data="guess_1"),
+         InlineKeyboardButton("2️⃣", callback_data="guess_2"),
+         InlineKeyboardButton("3️⃣", callback_data="guess_3"),
+         InlineKeyboardButton("4️⃣", callback_data="guess_4")],
+    ])
+
+    await update.message.reply_text(
+        f"🔮 <b>بازی حدس بزن</b>\n\n"
+        f"💰 شرط: <b>{fmt(bet)}</b> DP\n"
+        f"🎯 یکی از ۴ جعبه را انتخاب کنید!\n"
+        f"💎 ضرایب مخفی: 10x | 5x | 2.5x | 1.2x\n\n"
+        f"⏳ ۱۰ دقیقه وقت دارید.",
+        parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    # Validate
+    if ctx.user_data.get('guess_uid') != uid:
+        await q.edit_message_text("❌ این بازی متعلق به شما نیست!")
+        return
+
+    # Timeout check
+    if time.time() - ctx.user_data.get('guess_time', 0) > config.GAME_TIMEOUT:
+        await q.edit_message_text("⏳ زمان بازی تمام شد!")
+        ctx.user_data.pop('guess_bet', None)
+        ctx.user_data.pop('guess_uid', None)
+        ctx.user_data.pop('guess_time', None)
+        ctx.user_data.pop('guess_mults', None)
+        return
+
+    bet = ctx.user_data.get('guess_bet', 0)
+    mults = ctx.user_data.get('guess_mults', [10, 5, 2.5, 1.2])
+    pick = int(q.data.split('_')[1])  # 1-4
+    mult = mults[pick - 1]
+
+    # Clean up
+    for k in ('guess_bet', 'guess_uid', 'guess_time', 'guess_mults'):
+        ctx.user_data.pop(k, None)
+
+    win = int(bet * mult)
+    db.add_balance(uid, win)
+    db.check_level_up(uid)
+
+    # Reveal all
+    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    reveal = " | ".join(
+        f"{emojis[i]}={m}x{' ✅' if i == pick - 1 else ''}"
+        for i, m in enumerate(mults)
+    )
+
+    await q.edit_message_text(
+        f"🔮 <b>نتیجه حدس بزن</b>\n\n"
+        f"🎯 انتخاب شما: {emojis[pick - 1]}\n"
+        f"💎 ضریب: <b>{mult}x</b>\n"
+        f"🎉 برنده: <b>+{fmt(win)}</b> DP\n\n"
+        f"📊 ضرایب: {reveal}",
+        parse_mode=ParseMode.HTML)
+
+
+# ══════════════════════════════════════════════
+#        4) CASINO  (🎰 کازینو — 7x/12x/15x)
+# ══════════════════════════════════════════════
+async def cmd_casino(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.message.reply_text("⚠️ فقط در <b>گروه</b>!", parse_mode=ParseMode.HTML)
+        return
+
+    bet, ok = await _parse_bet(update, ctx, config.CASINO_MIN_BET)
+    if not ok:
+        return
+
+    uid = update.effective_user.id
+    uname = html.escape(update.effective_user.first_name or "بازیکن")
+
+    status_msg = await update.message.reply_text(
+        f"🎰 <b>کازینو شروع شد!</b>\n"
+        f"👤 {uname}\n"
+        f"💰 شرط: <b>{fmt(bet)}</b> DP\n\n"
+        f"⏳ در حال چرخش...",
+        parse_mode=ParseMode.HTML)
+
+    dice_msg = await ctx.bot.send_dice(update.effective_chat.id, emoji='🎰')
+    val = dice_msg.dice.value
+
+    # 🎰 values: 64=seven(15x), 43=lemon(12x), 22=grape(7x), else lose
+    mult_map = {64: 15, 43: 12, 22: 7}
+    mult = mult_map.get(val, 0)
+
+    if mult > 0:
+        win = bet * mult
+        db.add_balance(uid, win)
+        db.check_level_up(uid)
+        await status_msg.edit_text(
+            f"🎰 <b>کازینو!</b>\n"
+            f"👤 {uname}\n"
+            f"🎰 ضریب: <b>{mult}x</b>\n"
+            f"🎉 برنده: <b>+{fmt(win)}</b> DP\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)
+    else:
+        await status_msg.edit_text(
+            f"🎰 <b>کازینو!</b>\n"
+            f"👤 {uname}\n"
+            f"💀 باختید: <b>-{fmt(bet)}</b> DP\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)
+
+
+# ══════════════════════════════════════════════
+#    5) BOMB  (💣 بمب — 4×4, 6 bombs, +0.2x)
+# ══════════════════════════════════════════════
+async def cmd_bomb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.message.reply_text("⚠️ فقط در <b>گروه</b>!", parse_mode=ParseMode.HTML)
+        return
+
+    bet, ok = await _parse_bet(update, ctx, config.BOMB_MIN_BET)
+    if not ok:
+        return
+
+    uid = update.effective_user.id
+    uname = html.escape(update.effective_user.first_name or "بازیکن")
+
+    # Generate grid: 16 cells, 6 bombs
+    grid = [0] * 16
+    bomb_positions = random.sample(range(16), config.BOMB_COUNT)
+    for b in bomb_positions:
+        grid[b] = 1
+
+    # Store game state
+    ctx.user_data['bomb'] = {
+        'grid': grid,
+        'revealed': set(),
+        'bet': bet,
+        'uid': uid,
+        'mult': 1.0,
+        'time': time.time(),
+        'chat_id': update.effective_chat.id,
+    }
+
+    total_safe = 16 - config.BOMB_COUNT
+    kb = _build_bomb_kb(set(), uid)
+
+    await update.message.reply_text(
+        f"💣 <b>بازی بمب</b>\n"
+        f"👤 {uname}\n"
+        f"💰 شرط: <b>{fmt(bet)}</b> DP\n"
+        f"🔲 گرید: 4×4 | 💣 بمب: {config.BOMB_COUNT} | ✅ امن: {total_safe}\n"
+        f"📈 ضریب فعلی: <b>1.0x</b>\n\n"
+        f"یک خانه انتخاب کنید (1-16):",
+        parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+def _build_bomb_kb(revealed, uid):
+    """Build 4×4 grid keyboard for bomb game"""
+    rows = []
+    for r in range(4):
+        row = []
+        for c in range(4):
+            idx = r * 4 + c + 1  # 1-16
+            if idx in revealed:
+                row.append(InlineKeyboardButton("✅", callback_data=f"bomb_{idx}"))
+            else:
+                row.append(InlineKeyboardButton(f"  {idx}  ", callback_data=f"bomb_{idx}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("💰 برداشت سود", callback_data="bomb_cash")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_bomb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    game = ctx.user_data.get('bomb')
+    if not game:
+        await q.edit_message_text("❌ بازی فعالی ندارید!")
+        return
+
+    if game['uid'] != uid:
+        await q.answer("❌ این بازی متعلق به شما نیست!", show_alert=True)
+        return
+
+    # Timeout
+    if time.time() - game['time'] > config.GAME_TIMEOUT:
+        await q.edit_message_text("⏳ زمان بازی تمام شد!")
+        ctx.user_data.pop('bomb', None)
+        return
+
+    # Cash out
+    if q.data == "bomb_cash":
+        win = int(game['bet'] * game['mult'])
+        db.add_balance(uid, win)
+        db.check_level_up(uid)
+        safe_count = len(game['revealed'])
+        ctx.user_data.pop('bomb', None)
+        await q.edit_message_text(
+            f"💰 <b>برداشت از بمب!</b>\n\n"
+            f"🔲 خانه‌های امن باز شده: <b>{safe_count}</b>\n"
+            f"📈 ضریب نهایی: <b>{game['mult']:.1f}x</b>\n"
+            f"🎉 برنده: <b>+{fmt(win)}</b> DP\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)
+        return
+
+    # Pick a cell
+    try:
+        cell = int(q.data.split('_')[1])
+    except (ValueError, IndexError):
+        return
+
+    if cell in game['revealed']:
+        await q.answer("⚠️ این خانه قبلاً باز شده!", show_alert=True)
+        return
+
+    game['revealed'].add(cell)
+    grid_idx = cell - 1
+
+    if game['grid'][grid_idx] == 1:
+        # BOOM!
+        ctx.user_data.pop('bomb', None)
+        # Reveal all bombs
+        bomb_cells = [i + 1 for i, v in enumerate(game['grid']) if v == 1]
+        await q.edit_message_text(
+            f"💥 <b>بمب خورد!</b>\n\n"
+            f"👤 بازیکن باخت!\n"
+            f"💀 از دست دادید: <b>-{fmt(game['bet'])}</b> DP\n"
+            f"🔲 خانه‌های امن باز شده: {len(game['revealed']) - 1}\n"
+            f"📈 ضریب: {game['mult']:.1f}x\n"
+            f"💣 بمب‌ها در خانه‌های: {', '.join(map(str, bomb_cells))}",
+            parse_mode=ParseMode.HTML)
+        return
+
+    # Safe! Increase multiplier by 0.2
+    game['mult'] = round(game['mult'] + config.BOMB_MULTIPLIER_STEP, 1)
+    safe_count = len(game['revealed'])
+    total_safe = 16 - config.BOMB_COUNT
+
+    # Check if all safe cells revealed
+    if safe_count >= total_safe:
+        win = int(game['bet'] * game['mult'])
+        db.add_balance(uid, win)
+        db.check_level_up(uid)
+        ctx.user_data.pop('bomb', None)
+        await q.edit_message_text(
+            f"🏆 <b>همه خانه‌های امن باز شد!</b>\n\n"
+            f"🔲 {total_safe} خانه امن!\n"
+            f"📈 ضریب نهایی: <b>{game['mult']:.1f}x</b>\n"
+            f"🎉 برنده: <b>+{fmt(win)}</b> DP\n"
+            f"💰 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML)
+        return
+
+    # Continue
+    potential_win = int(game['bet'] * game['mult'])
+    kb = _build_bomb_kb(game['revealed'], uid)
+    await q.edit_message_text(
+        f"💣 <b>بازی بمب</b>\n\n"
+        f"✅ امن! خانه {cell}\n"
+        f"📈 ضریب: <b>{game['mult']:.1f}x</b>\n"
+        f"💰 سود فعلی: <b>{fmt(potential_win)}</b> DP\n"
+        f"🔲 باقی‌مانده: {total_safe - safe_count} خانه امن\n\n"
+        f"ادامه بدهید یا برداشت کنید:",
+        parse_mode=ParseMode.HTML, reply_markup=kb)# bot.py — Dark Point Bot (قسمت 5/12)
+
+# ══════════════════════════════════════════════
+#        💎 TON WITHDRAWAL (NEW — کامل)
+# ══════════════════════════════════════════════
+# نرخ: 200,000,000 DP = 0.0005 TON
+# حداقل برداشت: 0.01 TON
+# جریان: مبلغ → آدرس کیف‌پول → تأیید → ارسال به ادمین
+
+# ──────────────── TON Withdraw Menu ────────────────
+async def msg_ton_withdraw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Display TON withdrawal main page"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('ton_withdraw') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    bal = db.get_balance(uid)
+    ton_eq = dp_to_ton(bal)
+    min_ton = config.TON_WITHDRAWAL_MIN
+    can_withdraw = ton_eq >= min_ton
+
+    # Build progress bar for minimum
+    pct = min(100, int(ton_eq / min_ton * 100)) if min_ton > 0 else 0
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+
+    text = (
+        f"💎 <b>برداشت TON</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💰 موجودی شما: <b>{fmt(bal)}</b> DP\n"
+        f"💎 معادل TON: <b>{ton_eq:.6f}</b> TON\n\n"
+        f"📊 <b>نرخ تبدیل:</b>\n"
+        f"   {fmt(config.TON_WITHDRAWAL_DP_RATE)} DP = {config.TON_WITHDRAWAL_TON_AMOUNT} TON\n\n"
+        f"📉 <b>حداقل برداشت:</b> {min_ton} TON\n"
+        f"📈 وضعیت: {bar} {pct}%\n\n"
+    )
+
+    if can_withdraw:
+        text += "✅ شما امکان برداشت دارید!\n"
+    else:
+        needed_dp = ton_to_dp(min_ton) - bal
+        text += (
+            f"⚠️ موجودی کافی نیست.\n"
+            f"🔻 به <b>{fmt(max(0, needed_dp))}</b> DP دیگر نیاز دارید.\n"
+        )
 
     text += (
-        f"\n👥 زیرمجموعه‌ها: {user['referral_count'] if user else 0}\n"
-        f"📊 کل دریافتی: <code>{format_number(user['total_earned'] if user else 0)}</code> DP"
+        f"\n💡 با زیرمجموعه‌گیری راحت می‌توانید برداشت کنید\n"
+        f"{'═' * 30}"
     )
 
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "💎 ثبت درخواست برداشت TON" if can_withdraw else "🔒 موجودی ناکافی",
+            callback_data="tw_start" if can_withdraw else "tw_locked"
+        )],
+        [InlineKeyboardButton("📜 سفارش‌های من", callback_data="tw_history")],
+    ])
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
-# ============ WHEEL ============
+# ──────────────── Start Withdrawal Flow ────────────────
+async def cb_tw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Step 1: Ask for TON amount"""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
 
-async def wheel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    if db.get_setting('wheel_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
+    if not db.is_section_on('ton_withdraw') and not is_admin(uid):
+        await safe_edit(q, section_off_text())
         return
 
-    can_free, remaining = db.can_spin_wheel_free(user.id)
-    balance = db.get_balance(user.id)
+    bal = db.get_balance(uid)
+    ton_eq = dp_to_ton(bal)
+    min_ton = config.TON_WITHDRAWAL_MIN
+
+    if ton_eq < min_ton:
+        await safe_edit(q,
+            f"❌ موجودی کافی نیست!\n"
+            f"💎 موجودی: {ton_eq:.6f} TON\n"
+            f"📉 حداقل: {min_ton} TON")
+        return
+
+    ctx.user_data['tw_step'] = 'amount'
+    ctx.user_data['tw_uid'] = uid
+
+    await safe_edit(q,
+        f"💎 <b>مرحله ۱: مقدار TON</b>\n"
+        f"{'─' * 28}\n\n"
+        f"💰 موجودی قابل برداشت: <b>{ton_eq:.6f}</b> TON\n"
+        f"📉 حداقل: <b>{min_ton}</b> TON\n\n"
+        f"📝 مقدار TON مورد نظر را وارد کنید:\n"
+        f"(مثال: <code>0.05</code>)\n\n"
+        f"⚠️ فقط عدد اعشاری وارد کنید.",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ لغو", callback_data="tw_cancel")]
+        ]))
+
+
+async def cb_tw_locked(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("🔒 موجودی شما برای برداشت کافی نیست!", show_alert=True)
+
+
+async def cb_tw_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    clear_user_state(ctx)
+    await safe_edit(q, "❌ عملیات برداشت لغو شد.")
+
+
+# ──────────────── Process Amount Input ────────────────
+async def process_tw_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Process TON amount from user text input"""
+    uid = update.effective_user.id
+    if ctx.user_data.get('tw_step') != 'amount' or ctx.user_data.get('tw_uid') != uid:
+        return False  # Not in this flow
+
+    text = (update.message.text or "").strip()
+
+    # Cancel command
+    if text in ('لغو', 'cancel', '/cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_kb())
+        return True
+
+    # Parse amount
+    try:
+        ton_amount = float(text)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ لطفاً یک عدد معتبر وارد کنید!\nمثال: <code>0.05</code>",
+            parse_mode=ParseMode.HTML)
+        return True
+
+    min_ton = config.TON_WITHDRAWAL_MIN
+    bal = db.get_balance(uid)
+    max_ton = dp_to_ton(bal)
+
+    if ton_amount < min_ton:
+        await update.message.reply_text(
+            f"❌ حداقل برداشت: <b>{min_ton}</b> TON\n"
+            f"مقدار وارد شده: {ton_amount} TON",
+            parse_mode=ParseMode.HTML)
+        return True
+
+    if ton_amount > max_ton:
+        await update.message.reply_text(
+            f"❌ موجودی کافی نیست!\n"
+            f"💎 حداکثر قابل برداشت: <b>{max_ton:.6f}</b> TON",
+            parse_mode=ParseMode.HTML)
+        return True
+
+    # Calculate DP cost
+    dp_cost = ton_to_dp(ton_amount)
+
+    # Store and move to wallet step
+    ctx.user_data['tw_step'] = 'wallet'
+    ctx.user_data['tw_ton'] = ton_amount
+    ctx.user_data['tw_dp'] = dp_cost
+
+    await update.message.reply_text(
+        f"✅ <b>مرحله ۱ تکمیل شد!</b>\n\n"
+        f"💎 مقدار: <b>{ton_amount}</b> TON\n"
+        f"💰 هزینه: <b>{fmt(dp_cost)}</b> DP\n\n"
+        f"{'─' * 28}\n\n"
+        f"📝 <b>مرحله ۲: آدرس کیف‌پول TON</b>\n\n"
+        f"آدرس کیف‌پول Keeper خود را وارد کنید:\n"
+        f"(مثال: <code>UQD...xyz</code>)\n\n"
+        f"⚠️ آدرس باید با <b>UQ</b> یا <b>EQ</b> شروع شود.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ لغو", callback_data="tw_cancel")]
+        ]))
+    return True
+
+
+# ──────────────── Process Wallet Input ────────────────
+async def process_tw_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Process TON wallet address from user text input"""
+    uid = update.effective_user.id
+    if ctx.user_data.get('tw_step') != 'wallet' or ctx.user_data.get('tw_uid') != uid:
+        return False  # Not in this flow
+
+    wallet = (update.message.text or "").strip()
+
+    # Cancel
+    if wallet in ('لغو', 'cancel', '/cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_kb())
+        return True
+
+    # Basic validation
+    if len(wallet) < 20:
+        await update.message.reply_text(
+            "❌ آدرس کیف‌پول نامعتبر است!\n"
+            "آدرس TON معمولاً ۴۸ کاراکتر است.")
+        return True
+
+    if not (wallet.startswith('UQ') or wallet.startswith('EQ') or
+            wallet.startswith('kQ') or wallet.startswith('0:')):
+        await update.message.reply_text(
+            "❌ آدرس نامعتبر!\n"
+            "آدرس TON باید با <b>UQ</b> یا <b>EQ</b> شروع شود.",
+            parse_mode=ParseMode.HTML)
+        return True
+
+    ton_amount = ctx.user_data.get('tw_ton', 0)
+    dp_cost = ctx.user_data.get('tw_dp', 0)
+
+    # Store wallet
+    ctx.user_data['tw_step'] = 'confirm'
+    ctx.user_data['tw_wallet'] = wallet
+
+    # Show confirmation
+    await update.message.reply_text(
+        f"📋 <b>تأیید سفارش برداشت TON</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💎 مقدار برداشت: <b>{ton_amount}</b> TON\n"
+        f"💰 هزینه از موجودی: <b>{fmt(dp_cost)}</b> DP\n"
+        f"🏦 کیف‌پول مقصد:\n<code>{html.escape(wallet)}</code>\n\n"
+        f"💰 موجودی فعلی: <b>{fmt(db.get_balance(uid))}</b> DP\n"
+        f"💰 موجودی پس از برداشت: <b>{fmt(db.get_balance(uid) - dp_cost)}</b> DP\n\n"
+        f"⚠️ پس از تأیید، DP از موجودی شما کسر می‌شود.\n"
+        f"{'═' * 30}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تأیید سفارش", callback_data="tw_confirm")],
+            [InlineKeyboardButton("❌ لغو", callback_data="tw_cancel")],
+        ]))
+    return True
+
+
+# ──────────────── Confirm & Submit Order ────────────────
+async def cb_tw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """User confirms the withdrawal order"""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    if ctx.user_data.get('tw_step') != 'confirm' or ctx.user_data.get('tw_uid') != uid:
+        await safe_edit(q, "❌ سفارش نامعتبر یا منقضی شده.")
+        return
+
+    ton_amount = ctx.user_data.get('tw_ton', 0)
+    dp_cost = ctx.user_data.get('tw_dp', 0)
+    wallet = ctx.user_data.get('tw_wallet', '')
+
+    if not ton_amount or not wallet:
+        await safe_edit(q, "❌ اطلاعات ناقص. لطفاً دوباره شروع کنید.")
+        clear_user_state(ctx)
+        return
+
+    # Final balance check
+    bal = db.get_balance(uid)
+    if bal < dp_cost:
+        await safe_edit(q,
+            f"❌ موجودی کافی نیست!\n"
+            f"💰 موجودی: {fmt(bal)} DP\n"
+            f"💰 نیاز: {fmt(dp_cost)} DP")
+        clear_user_state(ctx)
+        return
+
+    # Deduct DP
+    if not db.deduct_balance(uid, dp_cost):
+        await safe_edit(q, "❌ خطا در کسر موجودی. لطفاً دوباره تلاش کنید.")
+        clear_user_state(ctx)
+        return
+
+    # Create order in DB
+    uname = q.from_user.username or str(uid)
+    code = db.create_ton_withdrawal(uid, uname, wallet, ton_amount, dp_cost)
+
+    # Clear flow state
+    clear_user_state(ctx)
+
+    # Confirm to user
+    await safe_edit(q,
+        f"✅ <b>سفارش برداشت TON ثبت شد!</b>\n"
+        f"{'═' * 30}\n\n"
+        f"🏷 کد پیگیری: <code>{code}</code>\n"
+        f"💎 مقدار: <b>{ton_amount}</b> TON\n"
+        f"💰 هزینه: <b>{fmt(dp_cost)}</b> DP\n"
+        f"📊 وضعیت: ⏳ در انتظار تأیید ادمین\n\n"
+        f"💰 موجودی جدید: <b>{fmt(db.get_balance(uid))}</b> DP\n\n"
+        f"⏳ پس از تأیید ادمین، TON به کیف‌پول شما ارسال می‌شود.\n"
+        f"{'═' * 30}")
+
+    # ── Notify Admin ──
+    admin_text = (
+        f"💎 <b>درخواست برداشت TON جدید</b>\n"
+        f"{'═' * 30}\n\n"
+        f"👤 کاربر: {html.escape(uname)}\n"
+        f"🆔 آیدی: <code>{uid}</code>\n"
+        f"💎 مقدار: <b>{ton_amount}</b> TON\n"
+        f"💰 هزینه DP: <b>{fmt(dp_cost)}</b> DP\n"
+        f"🏦 کیف‌پول:\n<code>{html.escape(wallet)}</code>\n"
+        f"🏷 کد: <code>{code}</code>\n"
+        f"🕐 زمان: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"{'═' * 30}"
+    )
+    admin_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ انجام شد", callback_data=f"twadm_ok_{code}"),
+         InlineKeyboardButton("❌ رد", callback_data=f"twadm_no_{code}")],
+    ])
+    await safe_send(ctx.bot, config.ADMIN_ID, admin_text, admin_kb)
+
+
+# ──────────────── Admin: Approve ────────────────
+async def cb_tw_admin_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin approves TON withdrawal"""
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+
+    code = q.data.replace("twadm_ok_", "")
+    order = db.get_ton_withdrawal(code)
+    if not order:
+        await q.answer("❌ سفارش یافت نشد!", show_alert=True)
+        return
+    if order['status'] != 'pending':
+        await q.answer(f"⚠️ وضعیت: {order['status']}", show_alert=True)
+        return
+
+    # Update status
+    db.update_ton_status(code, 'approved')
+
+    # Update admin message
+    await safe_edit(q,
+        f"✅ <b>سفارش تأیید شد</b>\n\n"
+        f"🏷 کد: <code>{code}</code>\n"
+        f"💎 مقدار: {order['ton_amount']} TON\n"
+        f"👤 کاربر: {html.escape(order['username'])}\n"
+        f"📊 وضعیت: ✅ انجام شد")
+
+    # ── Notify User (in-bot, beautiful message) ──
+    user_text = (
+        f"🎉 <b>برداشت TON شما انجام شد!</b>\n"
+        f"{'═' * 30}\n\n"
+        f"🏷 کد پیگیری: <code>{code}</code>\n"
+        f"💎 مقدار: <b>{order['ton_amount']}</b> TON\n"
+        f"💰 هزینه: <b>{fmt(order['dp_cost'])}</b> DP\n"
+        f"🏦 کیف‌پول:\n<code>{html.escape(order['wallet_address'])}</code>\n"
+        f"📊 وضعیت: ✅ <b>انجام شد</b>\n"
+        f"🕐 زمان: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"💡 TON به کیف‌پول شما ارسال شد.\n"
+        f"{'═' * 30}"
+    )
+    await safe_send(ctx.bot, order['user_id'], user_text)
+
+    # ── Log Channel (masked wallet) ──
+    masked = mask_wallet(order['wallet_address'])
+    bot_user = await ctx.bot.get_me()
+    log_text = (
+        f"💎 <b>برداشت TON انجام شد</b>\n"
+        f"{'─' * 28}\n\n"
+        f"💎 مقدار: <b>{order['ton_amount']}</b> TON\n"
+        f"🏦 کیف‌پول: <code>{masked}</code>\n"
+        f"👤 کاربر: @{html.escape(order['username'])}\n"
+        f"🏷 کد: <code>{code}</code>\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
+    log_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔘 ورود به بات", url=f"https://t.me/{bot_user.username}")],
+    ])
+    await send_log(ctx.bot, log_text, log_kb)
+
+
+# ──────────────── Admin: Reject ────────────────
+async def cb_tw_admin_reject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin rejects TON withdrawal — refund DP, notify user only (no channel log)"""
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+
+    code = q.data.replace("twadm_no_", "")
+    order = db.get_ton_withdrawal(code)
+    if not order:
+        await q.answer("❌ سفارش یافت نشد!", show_alert=True)
+        return
+    if order['status'] != 'pending':
+        await q.answer(f"⚠️ وضعیت: {order['status']}", show_alert=True)
+        return
+
+    # Update status
+    db.update_ton_status(code, 'rejected')
+
+    # Refund DP to user
+    db.add_balance(order['user_id'], order['dp_cost'])
+
+    # Update admin message
+    await safe_edit(q,
+        f"❌ <b>سفارش رد شد</b>\n\n"
+        f"🏷 کد: <code>{code}</code>\n"
+        f"💎 مقدار: {order['ton_amount']} TON\n"
+        f"👤 کاربر: {html.escape(order['username'])}\n"
+        f"💰 بازگشت: {fmt(order['dp_cost'])} DP\n"
+        f"📊 وضعیت: ❌ رد شده")
+
+    # ── Notify User (in-bot ONLY — no channel log) ──
+    user_text = (
+        f"⚠️ <b>سفارش برداشت TON لغو شد</b>\n"
+        f"{'═' * 30}\n\n"
+        f"🏷 کد پیگیری: <code>{code}</code>\n"
+        f"💎 مقدار: <b>{order['ton_amount']}</b> TON\n"
+        f"💰 مبلغ بازگشتی: <b>+{fmt(order['dp_cost'])}</b> DP\n"
+        f"📊 وضعیت: ❌ <b>لغو شده</b>\n\n"
+        f"💰 موجودی فعلی: <b>{fmt(db.get_balance(order['user_id']))}</b> DP\n\n"
+        f"💡 مبلغ DP به حساب شما بازگردانده شد.\n"
+        f"{'═' * 30}"
+    )
+    await safe_send(ctx.bot, order['user_id'], user_text)
+    # No send_log here — rejected orders don't go to log channel
+
+
+# ──────────────── User: Order History ────────────────
+async def cb_tw_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show user's TON withdrawal history"""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    c = db.conn.cursor()
+    c.execute(
+        'SELECT * FROM ton_withdrawals WHERE user_id=? ORDER BY created_at DESC LIMIT 10',
+        (uid,))
+    orders = c.fetchall()
+
+    if not orders:
+        await safe_edit(q,
+            "📜 <b>تاریخچه برداشت TON</b>\n\n"
+            "📭 هنوز سفارشی ثبت نکرده‌اید.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="tw_back")]
+            ]))
+        return
+
+    status_emoji = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}
+    status_text = {'pending': 'در انتظار', 'approved': 'انجام شد', 'rejected': 'لغو شده'}
+
+    text = "📜 <b>تاریخچه برداشت TON</b>\n" + "─" * 28 + "\n\n"
+    for o in orders:
+        se = status_emoji.get(o['status'], '❓')
+        st = status_text.get(o['status'], o['status'])
+        text += (
+            f"🏷 <code>{o['tracking_code']}</code>\n"
+            f"   💎 {o['ton_amount']} TON | {se} {st}\n\n"
+        )
+
+    await safe_edit(q, text,
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="tw_back")]
+        ]))
+
+
+async def cb_tw_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    clear_user_state(ctx)
+    await safe_edit(q, "🔙 بازگشت به منو")
+    await ctx.bot.send_message(q.from_user.id, "منوی اصلی:", reply_markup=main_menu_kb())
+
+
+# ──────────────── Admin: TON Stats ────────────────
+async def msg_tw_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin TON withdrawal statistics"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return
+
+    stats = db.get_ton_stats()
+    pending = db.get_pending_ton()
 
     text = (
-        f"🎡 <b>گردونه شانس دارکی</b> 🎡\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code> DP\n\n"
-        f"🎁 جوایز: <code>{format_number(WHEEL_MIN_PRIZE)}</code> تا <code>{format_number(WHEEL_MAX_PRIZE)}</code>\n"
-        f"⏰ چرخش رایگان: هر ۲۴ ساعت\n"
-        f"💵 چرخش اضافی: <code>{format_number(WHEEL_EXTRA_COST)}</code>\n\n"
+        f"💎 <b>آمار برداشت TON</b>\n"
+        f"{'═' * 30}\n\n"
+        f"✅ سفارش‌های انجام شده: <b>{stats['ok']}</b>\n"
+        f"💎 کل TON پرداختی: <b>{stats['ton']:.4f}</b> TON\n"
+        f"💰 کل DP کسر شده: <b>{fmt(stats['dp'])}</b> DP\n\n"
+        f"⏳ در انتظار تأیید: <b>{stats['pending']}</b>\n"
+        f"❌ رد شده: <b>{stats['rejected']}</b>\n"
+        f"{'═' * 30}"
     )
-    buttons = []
-    if can_free:
-        buttons.append([InlineKeyboardButton("🎡 چرخش رایگان!", callback_data="wheel_spin_free")])
-        text += "✅ <b>چرخش رایگان آماده!</b>"
+
+    kb_rows = []
+    if pending:
+        kb_rows.append([InlineKeyboardButton(
+            f"📋 مشاهده {stats['pending']} سفارش در انتظار",
+            callback_data="twadm_list")])
+    kb_rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=InlineKeyboardMarkup(kb_rows))
+
+
+async def cb_tw_admin_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: list all pending TON withdrawals"""
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+
+    pending = db.get_pending_ton()
+    if not pending:
+        await safe_edit(q, "✅ سفارش در انتظاری وجود ندارد.")
+        return
+
+    text = "📋 <b>سفارش‌های در انتظار TON</b>\n" + "─" * 28 + "\n\n"
+    rows = []
+    for o in pending[:10]:  # Show max 10
+        text += (
+            f"🏷 <code>{o['tracking_code']}</code>\n"
+            f"   👤 {html.escape(o['username'])} | 💎 {o['ton_amount']} TON\n\n"
+        )
+        rows.append([
+            InlineKeyboardButton(f"✅ {o['tracking_code']}", callback_data=f"twadm_ok_{o['tracking_code']}"),
+            InlineKeyboardButton(f"❌ {o['tracking_code']}", callback_data=f"twadm_no_{o['tracking_code']}"),
+        ])
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")])
+    await safe_edit(q, text, InlineKeyboardMarkup(rows))# bot.py — Dark Point Bot (قسمت 6/12)
+
+# ══════════════════════════════════════════════
+#         🏦 DARK BANK (3% per 48h)
+# ══════════════════════════════════════════════
+
+async def msg_bank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('bank') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    bal = db.get_balance(uid)
+    deps = db.get_bank_deposits(uid)
+    now = int(time.time())
+
+    text = (
+        f"🏦 <b>بانک دارکی</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💎 موجودی آزاد: <b>{fmt(bal)}</b> DP\n"
+        f"📈 نرخ سود: <b>3%</b> هر ۴۸ ساعت\n"
+        f"⏳ دوره قفل: ۴۸ ساعت\n\n"
+    )
+
+    if deps:
+        text += f"📋 <b>سپرده‌های فعال ({len(deps)}):</b>\n" + "─" * 28 + "\n"
+        for d in deps:
+            elapsed = now - d['deposit_time']
+            rem = max(0, config.BANK_LOCK_PERIOD - elapsed)
+            interest = int(d['amount'] * config.BANK_INTEREST_RATE)
+            total = d['amount'] + interest
+            if rem == 0:
+                status = "🔓 <b>آزاد — قابل برداشت</b>"
+            else:
+                status = f"⏳ {seconds_to_hms(rem)} تا آزادسازی"
+            text += (
+                f"\n  💰 سپرده: <b>{fmt(d['amount'])}</b> DP\n"
+                f"  📈 سود: <b>+{fmt(interest)}</b> DP\n"
+                f"  💵 قابل برداشت: <b>{fmt(total)}</b> DP\n"
+                f"  {status}\n"
+            )
     else:
-        hours = int(remaining // 3600)
-        mins = int((remaining % 3600) // 60)
-        text += f"⏰ چرخش بعدی: <b>{hours}h {mins}m</b>"
-        buttons.append([InlineKeyboardButton("💵 چرخش اضافی", callback_data="wheel_spin_paid")])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="dark_point_menu")])
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+        text += "📭 سپرده فعالی ندارید.\n💡 DP خود را سپرده کنید و ۳٪ سود بگیرید!"
+
+    text += f"\n{'═' * 30}"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 سپرده‌گذاری", callback_data="bank_deposit")],
+        [InlineKeyboardButton("📤 برداشت سپرده", callback_data="bank_withdraw")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
-async def wheel_spin_free_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
+async def cb_bank_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
 
-    can_free, _ = db.can_spin_wheel_free(user.id)
-    if not can_free:
-        await query.answer("❌ چرخش رایگان تمام شده!", show_alert=True)
+    ctx.user_data['bank_action'] = 'deposit'
+    ctx.user_data['bank_uid'] = uid
+    bal = db.get_balance(uid)
+
+    await safe_edit(q,
+        f"💰 <b>سپرده‌گذاری در بانک</b>\n\n"
+        f"💎 موجودی: <b>{fmt(bal)}</b> DP\n"
+        f"📈 سود: ۳٪ پس از ۴۸ ساعت\n\n"
+        f"📝 مبلغ سپرده را وارد کنید (DP):\n"
+        f"(مثال: <code>1000000</code>)\n\n"
+        f"❌ برای لغو: <code>لغو</code>",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ لغو", callback_data="bank_cancel")]
+        ]))
+
+
+async def cb_bank_withdraw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    now = int(time.time())
+
+    deps = db.get_bank_deposits(uid)
+    free_deps = [d for d in deps if (now - d['deposit_time']) >= config.BANK_LOCK_PERIOD]
+
+    if not free_deps:
+        await safe_edit(q,
+            "❌ هیچ سپرده‌ای آزاد نشده است!\n"
+            "⏳ باید ۴۸ ساعت از زمان سپرده بگذرد.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="bank_back")]
+            ]))
         return
 
-    prize = random.randint(WHEEL_MIN_PRIZE, WHEEL_MAX_PRIZE)
-    db.add_dark_points(user.id, prize)
-    db.set_wheel_spin_time(user.id)
-    await asyncio.sleep(1)
-    await query.edit_message_text(
-        f"🎡 <b>گردونه چرخید!</b>\n\n🎉 جایزه: +<code>{format_number(prize)}</code> DP\n💎 موجودی: <code>{format_number(db.get_balance(user.id))}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="dark_point_menu")]])
-    )
+    rows = []
+    for d in free_deps:
+        interest = int(d['amount'] * config.BANK_INTEREST_RATE)
+        total = d['amount'] + interest
+        rows.append([InlineKeyboardButton(
+            f"💰 {fmt(d['amount'])} + {fmt(interest)} سود = {fmt(total)}",
+            callback_data=f"bw_{d['id']}"
+        )])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="bank_back")])
+
+    await safe_edit(q,
+        "📤 <b>برداشت سپرده</b>\n\n"
+        "سپرده مورد نظر را انتخاب کنید:",
+        InlineKeyboardMarkup(rows))
 
 
-async def wheel_spin_paid_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
+async def cb_bank_withdraw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    dep_id = int(q.data.split('_')[1])
 
-    if not db.remove_dark_points(user.id, WHEEL_EXTRA_COST):
-        await query.answer(f"❌ نیاز به {format_number(WHEEL_EXTRA_COST)} DP!", show_alert=True)
+    ok, res = db.bank_withdraw(uid, dep_id)
+    if ok:
+        db.check_level_up(uid)
+        await safe_edit(q,
+            f"✅ <b>برداشت موفق!</b>\n\n"
+            f"💰 مبلغ واریز شده: <b>{fmt(res)}</b> DP\n"
+            f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP\n\n"
+            f"📈 سود ۳٪ شامل مبلغ بالا است.")
+    else:
+        await safe_edit(q, f"❌ {res}")
+
+
+async def cb_bank_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    clear_user_state(ctx)
+    await safe_edit(q, "❌ عملیات بانکی لغو شد.")
+
+
+async def cb_bank_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    clear_user_state(ctx)
+    await safe_edit(q, "🔙 بازگشت")
+    await ctx.bot.send_message(q.from_user.id, "منوی اصلی:", reply_markup=main_menu_kb())
+
+
+async def process_bank_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Process bank deposit amount from text"""
+    uid = update.effective_user.id
+    if ctx.user_data.get('bank_action') != 'deposit' or ctx.user_data.get('bank_uid') != uid:
+        return False
+
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel', '/cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_kb())
+        return True
+
+    try:
+        amount = int(text)
+    except ValueError:
+        await update.message.reply_text("❌ لطفاً یک عدد صحیح وارد کنید!")
+        return True
+
+    if amount < 1000:
+        await update.message.reply_text("❌ حداقل سپرده: 1,000 DP")
+        return True
+
+    if db.bank_deposit(uid, amount):
+        clear_user_state(ctx)
+        interest = int(amount * config.BANK_INTEREST_RATE)
+        await update.message.reply_text(
+            f"✅ <b>سپرده ثبت شد!</b>\n\n"
+            f"💰 مبلغ: <b>{fmt(amount)}</b> DP\n"
+            f"📈 سود پس از ۴۸ ساعت: <b>+{fmt(interest)}</b> DP\n"
+            f"💵 قابل برداشت: <b>{fmt(amount + interest)}</b> DP\n"
+            f"⏳ زمان آزادسازی: ۴۸ ساعت\n\n"
+            f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+    else:
+        await update.message.reply_text("❌ موجودی کافی نیست!")
+    return True
+
+
+# ══════════════════════════════════════════════
+#           ⛏ MINER (ماینر دارکی)
+# ══════════════════════════════════════════════
+
+async def msg_miner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('miner') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    m = db.get_miner(uid)
+
+    if not m:
+        text = (
+            f"⛏ <b>ماینر دارکی</b>\n"
+            f"{'═' * 30}\n\n"
+            f"📭 شما هنوز ماینر ندارید!\n\n"
+            f"💡 با خرید ماینر می‌توانید TON یا USDT استخراج کنید.\n"
+            f"💰 هزینه خرید: <b>{fmt(config.MINER_BUY_COST)}</b> DP\n\n"
+            f"📊 <b>سطوح ماینر:</b>\n"
+            f"  L1: 0.01 TON/h | 0.03 USDT/h\n"
+            f"  L2: 0.03 TON/h | 0.05 USDT/h\n"
+            f"  L3: 0.04 TON/h | 0.07 USDT/h\n"
+            f"  L4: 0.06 TON/h | 0.09 USDT/h\n"
+            f"  L5: 0.09 TON/h | 0.12 USDT/h\n"
+            f"{'═' * 30}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"⛏ خرید ماینر ({fmt(config.MINER_BUY_COST)} DP)",
+                callback_data="miner_buy")],
+        ])
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    prize = random.randint(WHEEL_MIN_PRIZE, WHEEL_MAX_PRIZE)
-    db.add_dark_points(user.id, prize)
-    await asyncio.sleep(1)
-    net = prize - WHEEL_EXTRA_COST
-    await query.edit_message_text(
-        f"🎡 <b>چرخید!</b>\n🎉 جایزه: <code>{format_number(prize)}</code>\n💵 هزینه: -<code>{format_number(WHEEL_EXTRA_COST)}</code>\n📊 سود: <code>{format_number(net)}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="dark_point_menu")]])
+    # Has miner
+    now = int(time.time())
+    elec = max(0, m['electricity_end'] - now)
+    rates = config.MINER_LEVELS[m['level']]
+    is_running = elec > 0
+    up_cost = rates['upgrade'] if m['level'] < 5 else 0
+
+    # Calculate pending earnings
+    pending = db.collect_miner(uid)
+    pending_text = ""
+    if pending and (pending['ton'] > 0 or pending['usdt'] > 0):
+        pending_text = f"\n💰 درآمد جمع‌نشده: {pending['ton']:.6f} TON | {pending['usdt']:.4f} USDT"
+
+    status = "🟢 در حال کار" if is_running else "🔴 بدون برق"
+
+    text = (
+        f"⛏ <b>ماینر دارکی</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📊 سطح: <b>{m['level']}</b> / 5\n"
+        f"💎 ارز استخراج: <b>{m['currency']}</b>\n"
+        f"⚡ وضعیت: {status}\n"
+        f"🔋 برق باقی‌مانده: <b>{seconds_to_hms(elec)}</b>\n\n"
+        f"📈 <b>نرخ استخراج:</b>\n"
+        f"   TON: {rates['ton']}/h | USDT: {rates['usdt']}/h\n\n"
+        f"💰 <b>کل استخراج:</b>\n"
+        f"   TON: {m['total_ton']:.6f}\n"
+        f"   USDT: {m['total_usdt']:.4f}"
+        f"{pending_text}\n\n"
+        f"⚡ هزینه برق: {fmt(config.MINER_ELECTRICITY_COST)} DP/h"
+        + (f"\n⬆️ هزینه ارتقا: {fmt(up_cost)} DP" if up_cost else "\n✅ حداکثر سطح!")
+        + f"\n{'═' * 30}"
     )
 
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔋 خرید برق (1h)", callback_data="miner_elec"),
+         InlineKeyboardButton("⬆️ ارتقا", callback_data="miner_upgrade")],
+        [InlineKeyboardButton("💰 جمع‌آوری", callback_data="miner_collect"),
+         InlineKeyboardButton("🔄 تغییر ارز", callback_data="miner_switch")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-# ============ INFO PAGES ============
 
-INFO_PAGES = {
-    1: ("📖 <b>دارک پوینت - صفحه ۱/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "🏴 <b>دارک پوینت چیست؟</b>\n\n"
-        "واحد پولی اختصاصی ربات که با آن می‌توانید:\n\n"
-        "⭐ استارز تلگرام برداشت کنید\n"
-        "🛒 پنل VPN خریداری کنید\n"
-        "🎁 گیفت تدی بگیرید\n"
-        "🎮 بازی‌های متنوع کنید\n"
-        "⚒ ماینر دارکی داشته باشید\n"
-        "💱 ارز TON/USDT ماین و تبدیل کنید\n"
-        "🛍 از فروشگاه خرید کنید\n\n"
-        "⭐ <b>هر ۱ میلیون DP = ۵۰ استارز</b>"),
-    2: ("📖 <b>دارک پوینت - صفحه ۲/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "💰 <b>راه‌های کسب DP:</b>\n\n"
-        "1️⃣ کلمه <code>دارک</code> در گروه\n"
-        "2️⃣ زیرمجموعه‌گیری\n"
-        "3️⃣ کارخونه (ماین خودکار)\n"
-        "4️⃣ بانک (سود ۱۵٪)\n"
-        "5️⃣ بازی‌های شانسی\n"
-        "6️⃣ گردونه رایگان روزانه\n"
-        "7️⃣ تسک‌های عضویت و ماموریت\n"
-        "8️⃣ هدیه ثبت‌نام\n"
-        "9️⃣ ماینر دارکی + تبدیل ارز"),
-    3: ("📖 <b>دارک پوینت - صفحه ۳/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "📊 <b>سیستم ۲۰ سطحی:</b>\n\n"
-        "سطح ۱: 0 DP\nسطح ۵: 150K DP\nسطح ۱۰: 1M DP\n"
-        "سطح ۱۵: 3M DP\nسطح ۲۰: 20M DP\n\n"
-        "🎁 هر سطح پاداش ارتقا دارد!"),
-    4: ("📖 <b>دارک پوینت - صفحه ۴/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "🏭 <b>کارخونه دارکی:</b>\n"
-        "افتتاح: 100K | نگهداری: ساعتی 80\n"
-        "سطح ۱: 10 DP/دقیقه\nسطح ۵: 100 DP/دقیقه\n\n"
-        "🏦 <b>بانک دارکی:</b>\n"
-        "افتتاح: 20K | سود ۲۴ ساعته: <b>۱۵٪</b>"),
-    5: ("📖 <b>دارک پوینت - صفحه ۵/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "💥 <b>بازی انفجار (گروه):</b>\n<code>انفجار 1000</code>\n\n"
-        "🎲 <b>بازی تاس (گروه):</b>\n<code>تاس 15000</code>\n"
-        "۱ عدد: ۶x | ۲ عدد: ۳x | ۳ عدد: ۱.۵x"),
-    6: ("📖 <b>دارک پوینت - صفحه ۶/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "🎯 <b>بازی حدس بزن (گروه):</b>\nکلمه: <code>حدس بزن</code>\n"
-        "۱: ۱۰x | ۲: ۵x | ۳: ۲.۵x | ۴: ۱.۲x\n\n"
-        "🎰 <b>کازینو (گروه):</b>\nکلمه: <code>کازینو</code>\n"
-        "۷: ۱۵x | ۷+🍋: ۱۲x | +🍇: ۷x"),
-    7: ("📖 <b>دارک پوینت - صفحه ۷/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "💣 <b>بازی بمب (گروه):</b>\nکلمه: <code>بمب</code>\n"
-        "۴×۴ با ۶ بمب | هر امن: +۰.۴x\n\n"
-        "⚽ <b>فوتبال (گروه):</b>\nکلمه: <code>فوتبال</code>\n"
-        "تیرک: ۱۲x | +بیرون: ۷x | +گل: ۳x"),
-    8: ("📖 <b>دارک پوینت - صفحه ۸/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "🎡 <b>گردونه شانس:</b>\nچرخش رایگان روزانه\nجایزه: ۵-۱۰۰ هزار DP\n\n"
-        "💸 <b>انتقال DP:</b>\n<code>انتقال 1000</code> (ریپلای)\n"
-        "کارمزد: ۱۰٪\nمحدودیت: روزانه ۱۰ انتقال"),
-    9: ("📖 <b>دارک پوینت - صفحه ۹/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "📋 <b>تسک‌ها:</b>\n\n"
-        "• <b>عضویت کانال:</b> پاداش فوری\n"
-        "• <b>ماموریت:</b> اسکرین + تایید ادمین\n\n"
-        "⚠️ <b>شرط خرید پنل:</b>\nحداقل ۵ زیرمجموعه فعال"),
-    10: ("📖 <b>دارک پوینت - صفحه ۱۰/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "⚒ <b>ماینر دارکی (گروه):</b>\n"
-        "کلمه: <code>ماینر دارکی</code>\n"
-        "💵 خرید: ۵ میلیون DP\n\n"
-        "📊 سطوح:\n"
-        "ل۱: 0.01 TON | 0.03 USDT ساعتی\n"
-        "ل۲: 0.03 TON | 0.05 USDT ساعتی\n"
-        "ل۳: 0.04 TON | 0.07 USDT ساعتی\n"
-        "ل۴: 0.06 TON | 0.09 USDT ساعتی\n"
-        "ل۵: 0.09 TON | 0.12 USDT ساعتی\n\n"
-        "⚡ برق: هر 2M DP = 1 ساعت کار"),
-    11: ("📖 <b>دارک پوینت - صفحه ۱۱/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "💱 <b>تبدیل ارز به DP:</b>\n\n"
-        "• هر 0.01 TON = 100,000 DP\n"
-        "• هر 0.01 USDT = 50,000 DP\n\n"
-        "⚠️ حداقل تبدیل:\n"
-        "• TON: 0.7\n"
-        "• USDT: 2.0\n\n"
-        "🛍 <b>فروشگاه دارک پوینت:</b>\n"
-        "پلن‌های اختصاصی با DP بخرید!\n"
-        "تحویل آنی خودکار"),
-    12: ("📖 <b>دارک پوینت - صفحه ۱۲/۱۲</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        "⭐ <b>برداشت استارز:</b>\n"
-        "هر ۱M DP = ۵۰ استارز\n\n"
-        "📝 <b>دستورات گروه:</b>\n"
-        "<code>دارک</code> | <code>موجودی</code>\n"
-        "<code>پروفایل دارکی</code>\n"
-        "<code>بازی</code> | <code>انفجار</code>\n"
-        "<code>تاس</code> | <code>حدس بزن</code>\n"
-        "<code>کازینو</code> | <code>بمب</code>\n"
-        "<code>فوتبال</code> | <code>ماینر دارکی</code>\n"
-        "<code>انتقال</code> | <code>بانک دارکی</code>\n"
-        "<code>کارخونه دارکی</code>"),
+async def cb_miner_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    if db.buy_miner(uid):
+        await safe_edit(q,
+            f"✅ <b>ماینر خریداری شد!</b>\n\n"
+            f"⛏ سطح: 1\n"
+            f"💎 ارز پیش‌فرض: TON\n\n"
+            f"⚠️ برای شروع استخراج، برق بخرید!")
+    else:
+        await q.answer(f"❌ موجودی کافی نیست! ({fmt(config.MINER_BUY_COST)} DP)", show_alert=True)
+
+
+async def cb_miner_elec(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    if db.buy_electricity(uid, 1):
+        m = db.get_miner(uid)
+        elec = max(0, m['electricity_end'] - int(time.time())) if m else 0
+        await safe_edit(q,
+            f"✅ <b>۱ ساعت برق خریداری شد!</b>\n\n"
+            f"🔋 برق باقی‌مانده: <b>{seconds_to_hms(elec)}</b>")
+    else:
+        await q.answer(f"❌ موجودی کافی نیست! ({fmt(config.MINER_ELECTRICITY_COST)} DP)", show_alert=True)
+
+
+async def cb_miner_upgrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    ok, res = db.upgrade_miner(uid)
+    if ok:
+        await safe_edit(q,
+            f"✅ <b>ماینر ارتقا یافت!</b>\n\n"
+            f"📊 سطح جدید: <b>{res}</b>\n"
+            f"📈 نرخ: {config.MINER_LEVELS[res]['ton']} TON/h | "
+            f"{config.MINER_LEVELS[res]['usdt']} USDT/h")
+    else:
+        await q.answer(f"❌ {res}", show_alert=True)
+
+
+async def cb_miner_collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    r = db.collect_miner(uid)
+    if r and (r['ton'] > 0 or r['usdt'] > 0):
+        m = db.get_miner(uid)
+        await safe_edit(q,
+            f"✅ <b>درآمد جمع‌آوری شد!</b>\n\n"
+            f"💎 TON: <b>{r['ton']:.6f}</b>\n"
+            f"💵 USDT: <b>{r['usdt']:.4f}</b>\n\n"
+            f"📊 کل TON: {m['total_ton']:.6f}\n"
+            f"📊 کل USDT: {m['total_usdt']:.4f}")
+    else:
+        await q.answer("⚠️ درآمدی برای جمع‌آوری نیست!", show_alert=True)
+
+
+async def cb_miner_switch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    m = db.get_miner(uid)
+    if not m:
+        return
+    new_cur = 'USDT' if m['currency'] == 'TON' else 'TON'
+    db.set_miner_currency(uid, new_cur)
+    await safe_edit(q,
+        f"✅ ارز استخراج تغییر کرد!\n\n"
+        f"💎 ارز فعلی: <b>{new_cur}</b>")
+
+
+# ══════════════════════════════════════════════
+#         🏭 FACTORY (کارخونه دارکی)
+# ══════════════════════════════════════════════
+# 5 levels, each increases DP production
+
+FACTORY_LEVELS = {
+    1: {"cost": 0, "production": 500, "name": "کارگاه کوچک"},
+    2: {"cost": 10_000_000, "production": 1500, "name": "کارخانه متوسط"},
+    3: {"cost": 50_000_000, "production": 4000, "name": "کارخانه بزرگ"},
+    4: {"cost": 200_000_000, "production": 10000, "name": "مجتمع صنعتی"},
+    5: {"cost": 500_000_000, "production": 25000, "name": "ابرکارخانه"},
 }
 
-async def dp_info_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    page = int(query.data.split("_")[-1])
-    text = INFO_PAGES.get(page, "یافت نشد")
-    buttons = []
-    if page > 1:
-        buttons.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"dp_info_{page-1}"))
-    if page < 12:
-        buttons.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"dp_info_{page+1}"))
-    keyboard = [buttons] if buttons else []
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="dark_point_menu")])
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
-
-# ============ CONVERT CURRENCY MENU ============
-
-async def convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    if db.get_setting('convert_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
+async def msg_factory(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
         return
-
-    miner = db.get_miner(user.id)
-    ton_balance = miner['ton_balance'] if miner else 0
-    usdt_balance = miner['usdt_balance'] if miner else 0
-    
-    # محاسبه معادل DP
-    ton_dp = int((ton_balance / 0.01) * TON_TO_DP_RATE) if ton_balance >= MIN_TON_CONVERT else 0
-    usdt_dp = int((usdt_balance / 0.01) * USDT_TO_DP_RATE) if usdt_balance >= MIN_USDT_CONVERT else 0
-
-    text = (
-        f"💱 <b>تبدیل ارز به دارک پوینت</b> 💱\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"💎 موجودی DP: <code>{format_number(db.get_balance(user.id))}</code>\n\n"
-        f"💰 <b>موجودی ارزهای شما:</b>\n"
-        f"🪙 TON: <code>{format_crypto(ton_balance, 4)}</code>\n"
-        f"💵 USDT: <code>{format_crypto(usdt_balance, 4)}</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>نرخ تبدیل:</b>\n"
-        f"• هر 0.01 TON = <code>{format_number(TON_TO_DP_RATE)}</code> DP\n"
-        f"• هر 0.01 USDT = <code>{format_number(USDT_TO_DP_RATE)}</code> DP\n\n"
-        f"⚠️ حداقل: TON ≥ {MIN_TON_CONVERT} | USDT ≥ {MIN_USDT_CONVERT}\n"
-    )
-
-    kb = []
-    if ton_balance >= MIN_TON_CONVERT:
-        kb.append([InlineKeyboardButton(f"🪙 تبدیل {format_crypto(ton_balance, 2)} TON → {format_number(ton_dp)} DP", callback_data="convert_ton_all")])
-    else:
-        needed = MIN_TON_CONVERT - ton_balance
-        kb.append([InlineKeyboardButton(f"🪙 TON: نیاز {format_crypto(needed, 2)} بیشتر", callback_data="convert_ton_insufficient")])
-    
-    if usdt_balance >= MIN_USDT_CONVERT:
-        kb.append([InlineKeyboardButton(f"💵 تبدیل {format_crypto(usdt_balance, 2)} USDT → {format_number(usdt_dp)} DP", callback_data="convert_usdt_all")])
-    else:
-        needed = MIN_USDT_CONVERT - usdt_balance
-        kb.append([InlineKeyboardButton(f"💵 USDT: نیاز {format_crypto(needed, 2)} بیشتر", callback_data="convert_usdt_insufficient")])
-    
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")])
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def convert_ton_all_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-
-    miner = db.get_miner(user.id)
-    if not miner or miner['ton_balance'] < MIN_TON_CONVERT:
-        await query.answer(f"❌ حداقل {MIN_TON_CONVERT} TON نیاز!", show_alert=True)
-        return
-
-    ton_amount = miner['ton_balance']
-    dp_received = db.convert_ton_to_dp(user.id, ton_amount)
-
-    await query.edit_message_text(
-        f"✅ <b>تبدیل موفق!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🪙 تبدیل: <code>{format_crypto(ton_amount, 4)}</code> TON\n"
-        f"💎 دریافتی: +<code>{format_number(dp_received)}</code> DP\n\n"
-        f"💰 موجودی جدید: <code>{format_number(db.get_balance(user.id))}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="convert_menu")]])
-    )
-
-
-async def convert_usdt_all_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-
-    miner = db.get_miner(user.id)
-    if not miner or miner['usdt_balance'] < MIN_USDT_CONVERT:
-        await query.answer(f"❌ حداقل {MIN_USDT_CONVERT} USDT نیاز!", show_alert=True)
-        return
-
-    usdt_amount = miner['usdt_balance']
-    dp_received = db.convert_usdt_to_dp(user.id, usdt_amount)
-
-    await query.edit_message_text(
-        f"✅ <b>تبدیل موفق!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"💵 تبدیل: <code>{format_crypto(usdt_amount, 4)}</code> USDT\n"
-        f"💎 دریافتی: +<code>{format_number(dp_received)}</code> DP\n\n"
-        f"💰 موجودی جدید: <code>{format_number(db.get_balance(user.id))}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="convert_menu")]])
-    )
-
-
-async def convert_insufficient_cb(update, context):
-    query = update.callback_query
-    await query.answer("❌ موجودی ارز شما کافی نیست! بیشتر ماین کنید.", show_alert=True)
-
-
-# ============ SHOP MENU ============
-
-async def shop_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    if db.get_setting('shop_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
-        return
-
-    plans = db.get_shop_plans(only_active=True)
-    balance = db.get_balance(user.id)
-
-    text = (
-        f"🛍 <b>فروشگاه دارک پوینت</b> 🛍\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code> DP\n\n"
-    )
-
-    if not plans:
-        text += "❌ در حال حاضر محصولی موجود نیست.\n\n<i>بزودی محصولات جدید اضافه می‌شود!</i>"
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]
-    else:
-        text += "پلن مورد نظر را انتخاب کنید:\n\n"
-        kb = []
-        for p in plans:
-            stock_text = ""
-            if p['stock'] == 0:
-                stock_text = " (ناموجود 🔒)"
-            elif p['stock'] > 0:
-                stock_text = f" ({p['stock']} عدد)"
-            
-            label = f"🛍 {p['name']} - {format_number(p['price'])} DP{stock_text}"
-            if p['stock'] == 0:
-                kb.append([InlineKeyboardButton(label, callback_data="shop_out_of_stock")])
-            else:
-                kb.append([InlineKeyboardButton(label, callback_data=f"shop_view_{p['plan_id']}")])
-        
-        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def shop_view_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    plan_id = int(query.data.split("_")[-1])
-
-    plan = db.get_shop_plan(plan_id)
-    if not plan:
-        await query.answer("❌ یافت نشد!", show_alert=True)
-        return
-
-    await query.answer()
-    stock_text = ""
-    if plan['stock'] >= 0:
-        stock_text = f"\n📦 موجودی: {plan['stock']} عدد"
-
-    text = (
-        f"🛍 <b>{html.escape(plan['name'])}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"📝 توضیحات:\n{html.escape(plan['description'] or 'توضیحی ندارد')}\n\n"
-        f"💰 قیمت: <code>{format_number(plan['price'])}</code> DP"
-        f"{stock_text}\n"
-        f"📊 فروش: {plan['sold_count']} عدد\n\n"
-        f"💎 موجودی شما: <code>{format_number(db.get_balance(user.id))}</code>"
-    )
-
-    kb = [
-        [InlineKeyboardButton(f"💳 خرید ({format_number(plan['price'])} DP)", callback_data=f"shop_buy_{plan_id}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="shop_menu")],
-    ]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def shop_buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    plan_id = int(query.data.split("_")[-1])
-
-    plan = db.get_shop_plan(plan_id)
-    if not plan:
-        await query.answer("❌ یافت نشد!", show_alert=True)
-        return
-    
-    if plan['stock'] == 0:
-        await query.answer("❌ ناموجود!", show_alert=True)
-        return
-
-    if not db.remove_dark_points(user.id, plan['price']):
-        await query.answer("❌ موجودی ناکافی!", show_alert=True)
-        return
-
-    db.increment_shop_sold(plan_id)
-    order_id = db.create_shop_order(user.id, plan_id, plan['name'], plan['price'])
-
-    await query.answer("✅ خرید موفق!", show_alert=True)
-
-    # تحویل محتوا بر اساس نوع
-    content_type = plan['content_type']
-    
-    try:
-        delivery_text = (
-            f"✅ <b>خرید موفق!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"🛍 محصول: <b>{html.escape(plan['name'])}</b>\n"
-            f"💵 پرداخت: <code>{format_number(plan['price'])}</code> DP\n"
-            f"🆔 سفارش: <code>{order_id}</code>\n\n"
-            f"⬇️ <b>محتوای شما:</b>"
-        )
-        
-        await context.bot.send_message(user.id, delivery_text, parse_mode=ParseMode.HTML)
-        
-        if content_type == 'text':
-            await context.bot.send_message(
-                user.id, 
-                f"📄 <b>محتوا:</b>\n\n<code>{html.escape(plan['content_data'])}</code>", 
-                parse_mode=ParseMode.HTML
-            )
-        elif content_type == 'photo':
-            await context.bot.send_photo(
-                user.id,
-                photo=plan['content_file_id'],
-                caption=plan['content_data'] or ""
-            )
-        elif content_type == 'document':
-            await context.bot.send_document(
-                user.id,
-                document=plan['content_file_id'],
-                caption=plan['content_data'] or ""
-            )
-        elif content_type == 'video':
-            await context.bot.send_video(
-                user.id,
-                video=plan['content_file_id'],
-                caption=plan['content_data'] or ""
-            )
-
-        await query.edit_message_text(
-            f"✅ <b>خرید انجام شد!</b>\n\n🛍 {html.escape(plan['name'])}\n💵 <code>{format_number(plan['price'])}</code> DP\n\n📩 محتوا به شما ارسال شد.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 فروشگاه", callback_data="shop_menu")]])
-        )
-
-        # لاگ
-        global BOT_USERNAME
-        if not BOT_USERNAME:
-            me = await context.bot.get_me()
-            BOT_USERNAME = me.username
-        
-        user_display = f"@{user.username}" if user.username else f"<code>{user.id}</code>"
-        log_kb = [[InlineKeyboardButton("🤖 ورود به ربات", url=f"https://t.me/{BOT_USERNAME}")]]
-        await send_log(context,
-            f"🛍 <b>خرید فروشگاه</b>\n\n👤 {user_display}\n🆔 <code>{user.id}</code>\n🛍 {html.escape(plan['name'])}\n💵 <code>{format_number(plan['price'])}</code>",
-            reply_markup=InlineKeyboardMarkup(log_kb)
-        )
-        
-    except Exception as e:
-        logger.error(f"Shop delivery error: {e}")
-        # اگر خطا شد، DP را برگردان
-        db.add_dark_points(user.id, plan['price'])
-        await query.edit_message_text(
-            f"❌ خطا در تحویل: {str(e)[:100]}\nمبلغ به شما بازگردانده شد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="shop_menu")]])
-        )
-
-
-async def shop_out_of_stock_cb(update, context):
-    query = update.callback_query
-    await query.answer("❌ این محصول در حال حاضر ناموجود است.", show_alert=True)
-
-
-# ============ TASKS MENU ============
-
-async def tasks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if db.get_setting('tasks_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
-        return
-
-    text = (
-        f"📋 <b>بخش انجام تسک</b> 📋\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 با انجام تسک‌ها DP رایگان کسب کنید:\n\n"
-        f"📢 <b>تسک عضویت:</b>\nعضویت در کانال → پاداش فوری\n\n"
-        f"🎖 <b>تسک ماموریت:</b>\nانجام کار + اسکرین‌شات → تایید ادمین"
-    )
-
-    kb = [
-        [InlineKeyboardButton("📢 تسک عضویت در کانال", callback_data="tasks_channel")],
-        [InlineKeyboardButton("🎖 تسک ماموریت", callback_data="tasks_mission")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
-    ]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def tasks_channel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    tasks = db.get_tasks(task_type='channel', only_active=True)
-    text = "📢 <b>تسک عضویت کانال</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-
-    if not tasks:
-        text += "❌ هیچ تسکی موجود نیست."
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="tasks_menu")]]
-    else:
-        kb = []
-        for task in tasks:
-            completed = db.is_task_completed(user.id, task['task_id'])
-            is_full = db.is_task_full(task['task_id'])
-            if completed:
-                status = "✅"
-            elif is_full:
-                status = "🔒"
-            else:
-                status = f"💰 {format_number(task['reward'])}"
-            label = f"📢 {task['channel_title']} - {status}"
-            if is_full and not completed:
-                kb.append([InlineKeyboardButton(label, callback_data="task_full")])
-            else:
-                kb.append([InlineKeyboardButton(label, callback_data=f"task_view_{task['task_id']}")])
-        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="tasks_menu")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def tasks_mission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    tasks = db.get_tasks(task_type='mission', only_active=True)
-    text = "🎖 <b>تسک ماموریت</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-
-    if not tasks:
-        text += "❌ ماموریتی موجود نیست."
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="tasks_menu")]]
-    else:
-        kb = []
-        for task in tasks:
-            completed = db.is_task_completed(user.id, task['task_id'])
-            is_full = db.is_task_full(task['task_id'])
-            pending = db.has_pending_mission_request(user.id, task['task_id'])
-            if completed:
-                status = "✅ انجام شده"
-            elif pending:
-                status = "⏳ در انتظار"
-            elif is_full:
-                status = "🔒 پر"
-            else:
-                status = f"💰 {format_number(task['reward'])}"
-            label = f"🎖 {task['channel_title']} - {status}"
-            if (is_full or completed or pending) and not pending:
-                kb.append([InlineKeyboardButton(label, callback_data="task_locked")])
-            else:
-                kb.append([InlineKeyboardButton(label, callback_data=f"task_mission_view_{task['task_id']}")])
-        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="tasks_menu")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def task_view_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    task_id = int(query.data.split("_")[-1])
-
-    task = db.get_task(task_id)
-    if not task:
-        await query.answer("❌", show_alert=True)
-        return
-    if db.is_task_completed(user.id, task_id):
-        await query.answer("✅ قبلاً انجام شده!", show_alert=True)
-        return
-    if db.is_task_full(task_id):
-        await query.answer("🔒 ظرفیت پر!", show_alert=True)
-        return
-
-    await query.answer()
-    username = task['channel_username'].replace('@', '')
-    capacity_text = ""
-    if task['capacity'] > 0:
-        remaining_cap = task['capacity'] - task['completed_count']
-        capacity_text = f"\n👥 ظرفیت: {remaining_cap}/{task['capacity']}"
-
-    text = (
-        f"📢 <b>تسک: عضویت در کانال</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"📢 کانال: {task['channel_title']}\n"
-        f"🔗 {task['channel_username']}\n"
-        f"💰 پاداش: <code>{format_number(task['reward'])}</code> DP"
-        f"{capacity_text}\n\n"
-        f"📝 مراحل:\n1️⃣ در کانال عضو شوید\n2️⃣ دکمه بررسی بزنید"
-    )
-
-    kb = [
-        [InlineKeyboardButton(f"📢 عضویت در {task['channel_title']}", url=f"https://t.me/{username}")],
-        [InlineKeyboardButton("✅ بررسی و دریافت", callback_data=f"task_verify_{task_id}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="tasks_channel")],
-    ]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def task_verify_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    task_id = int(query.data.split("_")[-1])
-
-    task = db.get_task(task_id)
-    if not task:
-        return
-    if db.is_task_completed(user.id, task_id):
-        await query.answer("✅ قبلاً دریافت شده!", show_alert=True)
-        return
-    if db.is_task_full(task_id):
-        await query.answer("🔒 ظرفیت پر!", show_alert=True)
-        return
-
-    try:
-        member = await context.bot.get_chat_member(task['channel_username'], user.id)
-        if member.status in ['left', 'kicked']:
-            await query.answer("❌ هنوز عضو نیستی!", show_alert=True)
-            return
-    except Exception:
-        await query.answer("❌ خطا! ربات باید ادمین کانال باشد.", show_alert=True)
-        return
-
-    db.add_dark_points(user.id, task['reward'])
-    db.mark_task_completed(user.id, task_id)
-
-    await query.answer(f"✅ +{format_number(task['reward'])} DP!", show_alert=True)
-    await query.edit_message_text(
-        f"✅ تسک انجام شد!\n💰 +<code>{format_number(task['reward'])}</code> DP",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="tasks_channel")]])
-    )
-
-
-async def task_mission_view_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    task_id = int(query.data.split("_")[-1])
-
-    task = db.get_task(task_id)
-    if not task:
-        return
-
-    await query.answer()
-    capacity_text = ""
-    if task['capacity'] > 0:
-        remaining_cap = task['capacity'] - task['completed_count']
-        capacity_text = f"\n👥 ظرفیت: {remaining_cap}/{task['capacity']}"
-
-    text = (
-        f"🎖 <b>تسک ماموریت</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"📝 عنوان: <b>{task['channel_title']}</b>\n"
-        f"💰 پاداش: <code>{format_number(task['reward'])}</code> DP"
-        f"{capacity_text}\n\n"
-        f"📋 توضیحات:\n{html.escape(task['description'] or 'ندارد')}\n\n"
-        f"📸 مراحل:\n1️⃣ ماموریت را انجام دهید\n2️⃣ اسکرین‌شات بگیرید\n3️⃣ دکمه زیر را بزنید"
-    )
-
-    kb = [
-        [InlineKeyboardButton("📸 ارسال اسکرین‌شات", callback_data=f"task_mission_submit_{task_id}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="tasks_mission")],
-    ]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def task_mission_submit_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    task_id = int(query.data.split("_")[-1])
-
-    task = db.get_task(task_id)
-    if not task:
-        return
-    if db.is_task_completed(user.id, task_id):
-        await query.answer("✅ انجام شده!", show_alert=True)
-        return
-    if db.has_pending_mission_request(user.id, task_id):
-        await query.answer("⏳ در انتظار تایید!", show_alert=True)
-        return
-    if db.is_task_full(task_id):
-        await query.answer("🔒 ظرفیت پر!", show_alert=True)
-        return
-
-    await query.answer()
-    context.user_data['awaiting_mission_screenshot'] = task_id
-
-    await query.edit_message_text(
-        f"📸 <b>ارسال اسکرین‌شات</b>\n\n🎖 {task['channel_title']}\n💰 <code>{format_number(task['reward'])}</code> DP\n\n📸 اسکرین را ارسال کنید.\n\nبرای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# ============ STARS ============
-
-async def stars_withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    if db.get_setting('stars_section_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
-        return
-
-    stars_price = int(db.get_setting('stars_price', '1000000'))
-    balance = db.get_balance(user.id)
-
-    text = (
-        f"⭐ <b>برداشت استارز تلگرام</b> ⭐\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code> DP\n"
-        f"⭐ نرخ: <code>{format_number(stars_price)}</code> DP = {STARS_AMOUNT} استارز\n\n"
-    )
-
-    if balance >= stars_price:
-        text += "✅ می‌توانید برداشت کنید!"
-        kb = [
-            [InlineKeyboardButton(f"⭐ برداشت {STARS_AMOUNT} استارز", callback_data="stars_do")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
-        ]
-    else:
-        needed = stars_price - balance
-        text += f"❌ نیاز: <code>{format_number(needed)}</code> DP بیشتر"
-        kb = [
-            [InlineKeyboardButton("👥 زیرمجموعه‌گیری", callback_data="referral_menu")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
-        ]
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def stars_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    kb = [
-        [InlineKeyboardButton("👤 همین اکانتم", callback_data="stars_self")],
-        [InlineKeyboardButton("👥 اکانت دیگه", callback_data="stars_other")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="stars_withdraw")],
-    ]
-    await query.edit_message_text(
-        f"⭐ <b>برداشت {STARS_AMOUNT} استارز</b>\n\nبرای کدام اکانت؟",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-
-async def stars_self_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-
-    stars_price = int(db.get_setting('stars_price', '1000000'))
-    if not db.remove_dark_points(user.id, stars_price):
-        await query.answer("❌ موجودی ناکافی!", show_alert=True)
-        return
-
-    order_id = db.create_stars_order(user.id, str(user.id), 'self', STARS_AMOUNT, stars_price)
-    await query.edit_message_text(
-        f"✅ سفارش ثبت شد!\n⭐ {STARS_AMOUNT} استارز\n👤 <code>{user.id}</code>",
-        parse_mode=ParseMode.HTML
-    )
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    user_display = f"@{user.username}" if user.username else f"<code>{user.id}</code>"
-    log_kb = [[InlineKeyboardButton("🤖 ورود", url=f"https://t.me/{BOT_USERNAME}")]]
-    await send_log(context,
-        f"⭐ سفارش استارز\n👤 {user_display}\n🆔 <code>{user.id}</code>\n⭐ {STARS_AMOUNT}\n🆔 <code>{order_id}</code>",
-        reply_markup=InlineKeyboardMarkup(log_kb)
-    )
-
-    for admin_id in ADMIN_IDS:
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('factory') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+
+    c = db.conn.cursor()
+    c.execute('SELECT factory_level, factory_last_collect FROM users WHERE user_id=?', (uid,))
+    r = c.fetchone()
+
+    if not r or r[0] is None:
+        # Initialize factory for user
         try:
-            admin_kb = [
-                [InlineKeyboardButton("💬 پاسخ", callback_data=f"admin_reply_{user.id}")],
-                [InlineKeyboardButton("✅ تایید", callback_data=f"admin_confirm_stars_{order_id}")]
-            ]
-            await context.bot.send_message(
-                admin_id,
-                f"⭐ سفارش استارز\n👤 {user_display}\n🆔 <code>{user.id}</code>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(admin_kb)
-            )
+            c.execute('ALTER TABLE users ADD COLUMN factory_level INTEGER DEFAULT 0')
+            c.execute('ALTER TABLE users ADD COLUMN factory_last_collect INTEGER DEFAULT 0')
+            db.conn.commit()
         except Exception:
             pass
-
-
-async def stars_other_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data['awaiting_stars_target'] = True
-    await query.edit_message_text("👥 آیدی مقصد را بفرست:")
-
-
-# ============ FREE GIFT ============
-
-async def free_gift_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    if db.get_setting('gift_section_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
-        return
-
-    gift_price = int(db.get_setting('gift_teddy_price', '750000'))
-    balance = db.get_balance(user.id)
-
-    conn = db.get_conn()
-    c = conn.cursor()
-    c.execute("SELECT * FROM settings WHERE key LIKE 'gift_plan_%_name'")
-    plans = c.fetchall()
-    conn.close()
-
-    text = (
-        f"🎁 <b>گیفت رایگان تدی</b> 🎁\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🧸 گیفت تدی تلگرام\n"
-        f"💰 قیمت: <code>{format_number(gift_price)}</code> DP\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code>"
-    )
-
-    buttons = []
-    if balance >= gift_price:
-        buttons.append([InlineKeyboardButton("🧸 سفارش گیفت تدی", callback_data="order_gift_teddy")])
-
-    for plan in plans:
-        plan_num = plan['key'].split('_')[2]
-        name = plan['value']
-        price = int(db.get_setting(f'gift_plan_{plan_num}_price', '0'))
-        if price > 0:
-            buttons.append([InlineKeyboardButton(f"🎁 {name} ({format_number(price)})", callback_data=f"order_gift_custom_{plan_num}")])
-
-    buttons.append([InlineKeyboardButton("👥 زیرمجموعه‌گیری", callback_data="referral_menu")])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def order_gift_teddy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-
-    gift_price = int(db.get_setting('gift_teddy_price', '750000'))
-    if not db.remove_dark_points(user.id, gift_price):
-        await query.answer("❌ موجودی ناکافی!", show_alert=True)
-        return
-
-    order_id = db.create_gift_order(user.id, 'teddy', gift_price)
-    await query.edit_message_text(f"✅ سفارش ثبت شد!\n🆔 <code>{order_id}</code>", parse_mode=ParseMode.HTML)
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    user_display = f"@{user.username}" if user.username else f"<code>{user.id}</code>"
-    log_kb = [[InlineKeyboardButton("🤖 ورود", url=f"https://t.me/{BOT_USERNAME}")]]
-    await send_log(context,
-        f"🧸 سفارش گیفت تدی\n👤 {user_display}\n🆔 <code>{user.id}</code>",
-        reply_markup=InlineKeyboardMarkup(log_kb)
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            admin_kb = [[InlineKeyboardButton("💬 پاسخ", callback_data=f"admin_reply_{user.id}")]]
-            await context.bot.send_message(admin_id, f"🧸 گیفت\n👤 {user_display}", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(admin_kb))
-        except Exception:
-            pass
-
-
-async def order_gift_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    plan_num = query.data.split("_")[-1]
-    name = db.get_setting(f'gift_plan_{plan_num}_name', 'نامشخص')
-    price = int(db.get_setting(f'gift_plan_{plan_num}_price', '0'))
-    if not db.remove_dark_points(user.id, price):
-        await query.answer("❌ موجودی ناکافی!", show_alert=True)
-        return
-    db.create_gift_order(user.id, name, price)
-    await query.answer()
-    await query.edit_message_text(f"✅ سفارش {name} ثبت شد!", parse_mode=ParseMode.HTML)# ============ BUY DP ============
-
-async def buy_dp_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if db.get_setting('buy_dp_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
-        return
-
-    dp_amount = int(db.get_setting('buy_dp_amount', '500000'))
-    price_toman = int(db.get_setting('buy_dp_price_toman', '50000'))
-
-    text = (
-        f"💰 <b>خرید دارک پوینت</b> 💰\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"💎 هر <code>{format_number(dp_amount)}</code> DP\n"
-        f"💵 قیمت: <code>{format_number(price_toman)}</code> تومان\n\n"
-        f"📩 برای خرید به پشتیبانی پیام دهید."
-    )
-    kb = [
-        [InlineKeyboardButton("📩 پشتیبانی", url=f"https://t.me/{SUPPORT_USERNAME.replace('@', '')}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
-    ]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-# ============ LEADERBOARD ============
-
-async def leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    rows = db.get_leaderboard(100)
-    text = "🏆 <b>لیدربورد دارک پوینت</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    for i, row in enumerate(rows[:25], 1):
-        medal = medals.get(i, f"{i}.")
-        name = html.escape(row['first_name'] or row['username'] or str(row['user_id']))
-        text += f"{medal} <b>{name}</b> - <code>{format_number(row['dark_points'])}</code>\n"
-
-    if len(rows) > 25:
-        text += f"\n<i>... و {len(rows) - 25} نفر دیگر</i>"
-
-    kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-# ============ REFERRAL ============
-
-async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user.id}"
-    ref_count = db.get_referral_count(user.id)
-    ref_reward = get_referral_reward()
-
-    text = (
-        f"👥 <b>زیرمجموعه‌گیری</b> 👥\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔗 لینک شما:\n<code>{ref_link}</code>\n\n"
-        f"👥 زیرمجموعه‌ها: <b>{ref_count}</b>\n"
-        f"💰 پاداش هر زیرمجموعه: <b>{format_number(ref_reward)}</b> DP\n"
-        f"💎 کل درآمد: <code>{format_number(ref_count * ref_reward)}</code>\n\n"
-        f"📋 شرایط:\n• حل کپچا ✅\n• عضویت در کانال‌ها ✅\n\n"
-        f"⚠️ <b>شرط خرید پنل:</b> حداقل ۵ زیرمجموعه فعال!"
-    )
-    kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-# ============ LIKE CHALLENGE ============
-
-async def like_challenge_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    u = db.get_user(user.id)
-
-    if u['like_challenge_active'] and u['like_challenge_until'] > time.time():
-        remaining = u['like_challenge_until'] - time.time()
-        days = int(remaining // 86400)
-        hours = int((remaining % 86400) // 3600)
-        text = f"❤️ <b>چالش لایکی فعال</b>\n⏰ {days} روز و {hours} ساعت باقیمانده"
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]
+        f_level = 0
+        f_last = 0
     else:
-        text = f"❤️ <b>چالش لایکی ۷ روزه</b>\n💵 هزینه: {format_number(LIKE_CHALLENGE_COST)} DP"
-        kb = [
-            [InlineKeyboardButton(f"✅ فعال‌سازی", callback_data="like_activate")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
-        ]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        f_level = r[0] or 0
+        f_last = r[1] or 0
 
-
-async def like_activate_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    if not db.remove_dark_points(user.id, LIKE_CHALLENGE_COST):
-        await query.answer("❌ موجودی ناکافی!", show_alert=True)
-        return
-    db.update_user(user.id, like_challenge_active=1, like_challenge_until=time.time() + (7 * 86400))
-    await query.edit_message_text("✅ چالش لایکی فعال شد!", parse_mode=ParseMode.HTML)
-
-
-# ============ BUY PANEL (WITH 5 REFERRAL CHECK) ============
-
-async def buy_panel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-
-    if db.get_setting('buy_panel_active', '1') != '1':
-        await query.answer("❌ این بخش موقتاً غیرفعال می‌باشد.", show_alert=True)
-        return
-
-    ref_count = db.get_referral_count(user.id)
-    if ref_count < MIN_REFERRALS_FOR_PANEL:
-        needed_refs = MIN_REFERRALS_FOR_PANEL - ref_count
-        global BOT_USERNAME
-        if not BOT_USERNAME:
-            me = await context.bot.get_me()
-            BOT_USERNAME = me.username
-
-        ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user.id}"
+    if f_level == 0:
         text = (
-            f"⚠️ <b>برای خرید پنل باید حداقل ۵ زیرمجموعه داشته باشید!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"👥 زیرمجموعه‌های فعلی: <b>{ref_count}</b>\n"
-            f"📉 کسری: <b>{needed_refs}</b>\n\n"
-            f"🔗 لینک شما:\n<code>{ref_link}</code>"
+            f"🏭 <b>کارخونه دارکی</b>\n"
+            f"{'═' * 30}\n\n"
+            f"📭 شما هنوز کارخانه ندارید!\n\n"
+            f"💡 کارخانه هر ساعت DP تولید می‌کند.\n\n"
+            f"📊 <b>سطوح کارخانه:</b>\n"
         )
-        kb = [
-            [InlineKeyboardButton("👥 زیرمجموعه‌گیری", callback_data="referral_menu")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")],
-        ]
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+        for lv, info in FACTORY_LEVELS.items():
+            text += f"  L{lv}: {info['name']} | {fmt(info['production'])} DP/h"
+            if lv > 1:
+                text += f" | ارتقا: {fmt(info['cost'])} DP"
+            text += "\n"
+
+        text += f"{'═' * 30}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏭 ساخت کارخانه (رایگان)", callback_data="factory_build")],
+        ])
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    price_500 = int(db.get_setting('panel_snai_500gb', str(DEFAULT_PANEL_PRICES['snai_500gb'])))
-    price_800 = int(db.get_setting('panel_snai_800gb', str(DEFAULT_PANEL_PRICES['snai_800gb'])))
-    price_1tb = int(db.get_setting('panel_snai_1tb', str(DEFAULT_PANEL_PRICES['snai_1tb'])))
+    # Has factory
+    now = int(time.time())
+    info = FACTORY_LEVELS[f_level]
+    hours = (now - f_last) / 3600 if f_last > 0 else 0
+    pending = int(info['production'] * min(hours, 24))  # Max 24h accumulation
+    next_cost = FACTORY_LEVELS[f_level + 1]['cost'] if f_level < 5 else 0
 
-    buttons = [
-        [InlineKeyboardButton(f"🛒 سنایی 500GB ({format_number(price_500)} DP)", callback_data="panel_buy_snai_500gb")],
-        [InlineKeyboardButton(f"🛒 سنایی 800GB ({format_number(price_800)} DP)", callback_data="panel_buy_snai_800gb")],
-        [InlineKeyboardButton(f"🛒 سنایی 1TB ({format_number(price_1tb)} DP)", callback_data="panel_buy_snai_1tb")],
+    text = (
+        f"🏭 <b>کارخونه دارکی</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📊 سطح: <b>{f_level}</b> / 5 ({info['name']})\n"
+        f"📈 تولید: <b>{fmt(info['production'])}</b> DP/h\n"
+        f"💰 درآمد جمع‌نشده: <b>{fmt(pending)}</b> DP\n\n"
+    )
+    if f_level < 5:
+        text += f"⬆️ هزینه ارتقا: <b>{fmt(next_cost)}</b> DP\n"
+    else:
+        text += "✅ حداکثر سطح!\n"
+    text += f"{'═' * 30}"
+
+    kb_rows = [
+        [InlineKeyboardButton("💰 جمع‌آوری", callback_data="factory_collect")],
     ]
+    if f_level < 5:
+        kb_rows.append([InlineKeyboardButton("⬆️ ارتقا", callback_data="factory_upgrade")])
 
-    for panel in db.get_custom_panels():
-        buttons.append([InlineKeyboardButton(
-            f"🛒 {panel['name']} ({format_number(panel['price'])} DP)",
-            callback_data=f"panel_buy_custom_{panel['panel_id']}"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=InlineKeyboardMarkup(kb_rows))
+
+
+async def cb_factory_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    c = db.conn.cursor()
+    try:
+        c.execute('UPDATE users SET factory_level=1, factory_last_collect=? WHERE user_id=?',
+                  (int(time.time()), uid))
+        db.conn.commit()
+        await safe_edit(q, "✅ کارخانه سطح ۱ ساخته شد!\n📈 تولید: 500 DP/h")
+    except Exception:
+        await q.answer("❌ خطا!", show_alert=True)
+
+
+async def cb_factory_collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    c = db.conn.cursor()
+    c.execute('SELECT factory_level, factory_last_collect FROM users WHERE user_id=?', (uid,))
+    r = c.fetchone()
+    if not r or not r[0]:
+        await q.answer("❌ کارخانه ندارید!", show_alert=True); return
+
+    f_level = r[0]
+    f_last = r[1] or int(time.time())
+    now = int(time.time())
+    hours = (now - f_last) / 3600
+    info = FACTORY_LEVELS[f_level]
+    earned = int(info['production'] * min(hours, 24))
+
+    if earned < 1:
+        await q.answer("⚠️ هنوز درآمدی تولید نشده!", show_alert=True); return
+
+    db.add_balance(uid, earned)
+    c.execute('UPDATE users SET factory_last_collect=? WHERE user_id=?', (now, uid))
+    db.conn.commit()
+    db.check_level_up(uid)
+
+    await safe_edit(q,
+        f"✅ <b>درآمد کارخانه جمع‌آوری شد!</b>\n\n"
+        f"💰 +<b>{fmt(earned)}</b> DP\n"
+        f"⏱ مدت: {seconds_to_hms(int(hours * 3600))}\n"
+        f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP")
+
+
+async def cb_factory_upgrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    c = db.conn.cursor()
+    c.execute('SELECT factory_level FROM users WHERE user_id=?', (uid,))
+    r = c.fetchone()
+    if not r or not r[0]:
+        await q.answer("❌ کارخانه ندارید!", show_alert=True); return
+
+    f_level = r[0]
+    if f_level >= 5:
+        await q.answer("✅ حداکثر سطح!", show_alert=True); return
+
+    next_level = f_level + 1
+    cost = FACTORY_LEVELS[next_level]['cost']
+    if not db.deduct_balance(uid, cost):
+        await q.answer(f"❌ موجودی کافی نیست! ({fmt(cost)} DP)", show_alert=True); return
+
+    c.execute('UPDATE users SET factory_level=? WHERE user_id=?', (next_level, uid))
+    db.conn.commit()
+    info = FACTORY_LEVELS[next_level]
+    await safe_edit(q,
+        f"✅ <b>کارخانه ارتقا یافت!</b>\n\n"
+        f"📊 سطح: <b>{next_level}</b> ({info['name']})\n"
+        f"📈 تولید: <b>{fmt(info['production'])}</b> DP/h")
+
+
+# ══════════════════════════════════════════════
+#         💸 TRANSFER (انتقال DP)
+# ══════════════════════════════════════════════
+
+async def cmd_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Transfer DP to another user — 10% fee, 10/day limit"""
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.message.reply_text("⚠️ انتقال فقط در <b>گروه</b> ممکن است!",
+                                        parse_mode=ParseMode.HTML)
+        return
+
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+
+    # Check daily limit
+    if not db.can_transfer(uid):
+        await update.message.reply_text(
+            f"❌ حد مجاز انتقال روزانه ({config.TRANSFER_DAILY_LIMIT} بار) تمام شده!")
+        return
+
+    parts = (update.message.text or "").strip().split()
+    if len(parts) < 2:
+        await update.message.reply_text(
+            f"💸 <b>انتقال DP</b>\n\n"
+            f"📝 دستور: <code>انتقال [مبلغ]</code>\n"
+            f"💰 کارمزد: {int(config.TRANSFER_FEE * 100)}%\n"
+            f"📊 حد روزانه: {config.TRANSFER_DAILY_LIMIT} بار\n\n"
+            f"⚠️ روی پیام کاربر مقصد ریپلای کنید!",
+            parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ مبلغ نامعتبر!")
+        return
+
+    if amount < 1000:
+        await update.message.reply_text("❌ حداقل انتقال: 1,000 DP")
+        return
+
+    # Must reply to target user
+    if not update.message.reply_to_message:
+        await update.message.reply_text("⚠️ روی پیام کاربر مقصد <b>ریپلای</b> کنید!",
+                                        parse_mode=ParseMode.HTML)
+        return
+
+    target = update.message.reply_to_message.from_user
+    if not target or target.id == uid:
+        await update.message.reply_text("❌ نمی‌توانید به خودتان انتقال دهید!")
+        return
+    if target.is_bot:
+        await update.message.reply_text("❌ نمی‌توانید به ربات انتقال دهید!")
+        return
+
+    # Ensure target exists in DB
+    db.create_user(target.id, target.username or "", target.first_name or "")
+
+    fee = int(amount * config.TRANSFER_FEE)
+    total_cost = amount + fee
+
+    ok, res = db.do_transfer(uid, target.id, amount)
+    if ok:
+        sender_name = html.escape(update.effective_user.first_name or "کاربر")
+        target_name = html.escape(target.first_name or "کاربر")
+        await update.message.reply_text(
+            f"✅ <b>انتقال موفق!</b>\n\n"
+            f"👤 از: {sender_name}\n"
+            f"👤 به: {target_name}\n"
+            f"💰 مبلغ: <b>{fmt(amount)}</b> DP\n"
+            f"💸 کارمزد: <b>{fmt(fee)}</b> DP\n"
+            f"💵 کل کسر: <b>{fmt(total_cost)}</b> DP",
+            parse_mode=ParseMode.HTML)
+        db.check_level_up(target.id)
+    else:
+        await update.message.reply_text(f"❌ {res}")# bot.py — Dark Point Bot (قسمت 7/12)
+
+# ══════════════════════════════════════════════
+#            🛒 SHOP (فروشگاه)
+# ══════════════════════════════════════════════
+
+async def msg_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('shop') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    items = db.get_shop_items()
+    bal = db.get_balance(uid)
+
+    if not items:
+        await update.message.reply_text(
+            "🛒 <b>فروشگاه</b>\n\n"
+            "📭 فروشگاه فعلاً خالی است.\n"
+            "بزودی محصولات جدید اضافه می‌شود!",
+            parse_mode=ParseMode.HTML)
+        return
+
+    text = (
+        f"🛒 <b>فروشگاه Dark Point</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💎 موجودی شما: <b>{fmt(bal)}</b> DP\n\n"
+    )
+
+    rows = []
+    for item in items:
+        stock_text = "نامحدود" if item['stock'] == -1 else str(item['stock'])
+        text += (
+            f"📦 <b>{html.escape(item['name'])}</b>\n"
+            f"   💰 قیمت: {fmt(item['price'])} DP | 📊 موجودی: {stock_text}\n\n"
+        )
+        rows.append([InlineKeyboardButton(
+            f"🛒 {item['name']} ({fmt(item['price'])} DP)",
+            callback_data=f"shop_buy_{item['id']}"
         )])
 
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")])
-    balance = db.get_balance(user.id)
-    text = (
-        f"🛒 <b>خرید پنل VPN سنایی</b> 🛒\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code> DP\n"
-        f"👥 زیرمجموعه: <b>{ref_count}</b> ✅\n\n"
-        f"<i>یک پلن انتخاب کنید:</i>"
-    )
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+    text += f"{'═' * 30}"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=InlineKeyboardMarkup(rows))
 
 
-async def panel_buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    data = query.data
+async def cb_shop_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    item_id = int(q.data.split('_')[2])
 
-    ref_count = db.get_referral_count(user.id)
-    if ref_count < MIN_REFERRALS_FOR_PANEL:
-        await query.answer(f"❌ نیاز به ۵ زیرمجموعه (شما: {ref_count})", show_alert=True)
+    ok, item = db.buy_shop_item(uid, item_id)
+    if not ok:
+        if item is None:
+            await q.answer("❌ موجودی کافی نیست یا محصول تمام شده!", show_alert=True)
         return
 
-    if data.startswith("panel_buy_custom_"):
-        panel_id = int(data.split("_")[-1])
-        conn = db.get_conn()
-        c = conn.cursor()
-        c.execute("SELECT * FROM custom_panels WHERE panel_id = ?", (panel_id,))
-        panel = c.fetchone()
-        conn.close()
-        if not panel:
-            return
-        name = panel['name']
-        price = panel['price']
-        data_limit = panel['data_limit']
-    else:
-        plan_key = data.replace("panel_buy_", "")
-        if plan_key == "snai_500gb":
-            name = "سنایی 500GB"
-            price = int(db.get_setting('panel_snai_500gb', str(DEFAULT_PANEL_PRICES['snai_500gb'])))
-            data_limit = "500GB"
-        elif plan_key == "snai_800gb":
-            name = "سنایی 800GB"
-            price = int(db.get_setting('panel_snai_800gb', str(DEFAULT_PANEL_PRICES['snai_800gb'])))
-            data_limit = "800GB"
-        elif plan_key == "snai_1tb":
-            name = "سنایی 1TB"
-            price = int(db.get_setting('panel_snai_1tb', str(DEFAULT_PANEL_PRICES['snai_1tb'])))
-            data_limit = "1TB"
+    # Deliver item
+    mtype = item['media_type']
+    content = item['media_content']
+    delivery_text = (
+        f"✅ <b>خرید موفق!</b>\n\n"
+        f"📦 {html.escape(item['name'])}\n"
+        f"💰 قیمت: {fmt(item['price'])} DP\n"
+        f"💎 موجودی: {fmt(db.get_balance(uid))} DP\n\n"
+        f"📋 <b>محصول شما:</b>"
+    )
+
+    try:
+        if mtype == 'photo':
+            await ctx.bot.send_photo(uid, content, caption=delivery_text,
+                                     parse_mode=ParseMode.HTML)
+        elif mtype == 'video':
+            await ctx.bot.send_video(uid, content, caption=delivery_text,
+                                     parse_mode=ParseMode.HTML)
+        elif mtype == 'document':
+            await ctx.bot.send_document(uid, content, caption=delivery_text,
+                                        parse_mode=ParseMode.HTML)
         else:
-            return
+            await ctx.bot.send_message(uid,
+                f"{delivery_text}\n\n<code>{html.escape(content)}</code>",
+                parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Shop delivery err: {e}")
+        await ctx.bot.send_message(uid,
+            f"{delivery_text}\n\n⚠️ خطا در ارسال. با پشتیبانی تماس بگیرید.",
+            parse_mode=ParseMode.HTML)
 
-    await query.answer()
-    if not db.remove_dark_points(user.id, price):
-        await query.answer("❌ موجودی ناکافی!", show_alert=True)
+    await safe_edit(q, f"✅ محصول <b>{html.escape(item['name'])}</b> خریداری شد!\nبه چت مراجعه کنید.",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="shop_back")]
+                    ]))
+
+
+async def cb_shop_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await safe_edit(q, "🔙 بازگشت به منو")
+    await ctx.bot.send_message(q.from_user.id, "منوی اصلی:", reply_markup=main_menu_kb())
+
+
+# ══════════════════════════════════════════════
+#            🎁 GIFT (هدیه)
+# ══════════════════════════════════════════════
+
+async def msg_gift(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('gift') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    plans = db.get_gift_plans()
+    bal = db.get_balance(uid)
+
+    text = (
+        f"🎁 <b>هدیه Dark Point</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💎 موجودی: <b>{fmt(bal)}</b> DP\n\n"
+        f"🧸 به دوستانتان هدیه بفرستید!\n\n"
+    )
+
+    rows = []
+    if plans:
+        for p in plans:
+            text += f"🎁 {html.escape(p['name'])} — <b>{fmt(p['price'])}</b> DP\n"
+            rows.append([InlineKeyboardButton(
+                f"🎁 {p['name']} ({fmt(p['price'])} DP)",
+                callback_data=f"gift_buy_{p['id']}"
+            )])
+    else:
+        text += "📭 پلن هدیه‌ای فعال نیست."
+
+    # Teddy bear gift (default)
+    teddy_price = int(db.get_setting('gift_price', '100000'))
+    text += f"\n🧸 خرس تدی — <b>{fmt(teddy_price)}</b> DP"
+    rows.insert(0, [InlineKeyboardButton(
+        f"🧸 خرس تدی ({fmt(teddy_price)} DP)",
+        callback_data="gift_teddy"
+    )])
+
+    text += f"\n{'═' * 30}"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def cb_gift_teddy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    price = int(db.get_setting('gift_price', '100000'))
+
+    if not db.deduct_balance(uid, price):
+        await q.answer("❌ موجودی کافی نیست!", show_alert=True)
         return
 
-    order_id = db.create_panel_order(user.id, name, price, "")
+    ctx.user_data['gift_type'] = 'teddy'
+    ctx.user_data['gift_uid'] = uid
+    await safe_edit(q,
+        "🧸 <b>هدیه خرس تدی</b>\n\n"
+        "🆔 آیدی عددی کاربر مقصد را وارد کنید:\n"
+        "(روی پیام کاربر ریپلای و دستور /gift هم کار می‌کند)")
 
-    await query.edit_message_text(
-        f"✅ <b>سفارش پنل ثبت شد!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🛒 پلن: <b>{name}</b>\n"
-        f"📊 حجم: <b>{data_limit}</b>\n"
-        f"💵 هزینه: <code>{format_number(price)}</code>\n"
-        f"🆔 سفارش: <code>{order_id}</code>\n\n"
-        f"⏳ ادمین کانفیگ رو از پنل سنایی بزودی ارسال می‌کند",
-        parse_mode=ParseMode.HTML
+
+async def cb_gift_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    plan_id = int(q.data.split('_')[2])
+
+    plans = db.get_gift_plans()
+    plan = next((p for p in plans if p['id'] == plan_id), None)
+    if not plan:
+        await q.answer("❌ پلن یافت نشد!", show_alert=True)
+        return
+
+    if not db.deduct_balance(uid, plan['price']):
+        await q.answer("❌ موجودی کافی نیست!", show_alert=True)
+        return
+
+    ctx.user_data['gift_type'] = 'plan'
+    ctx.user_data['gift_plan'] = plan['name']
+    ctx.user_data['gift_uid'] = uid
+    await safe_edit(q,
+        f"🎁 <b>هدیه {html.escape(plan['name'])}</b>\n\n"
+        f"🆔 آیدی عددی کاربر مقصد را وارد کنید:")
+
+
+async def process_gift_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    gtype = ctx.user_data.get('gift_type')
+    if not gtype or ctx.user_data.get('gift_uid') != uid:
+        return False
+
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_kb())
+        return True
+
+    try:
+        target_id = int(text)
+    except ValueError:
+        await update.message.reply_text("❌ آیدی عددی نامعتبر!")
+        return True
+
+    if target_id == uid:
+        await update.message.reply_text("❌ نمی‌توانید به خودتان هدیه بدهید!")
+        return True
+
+    target = db.get_user(target_id)
+    if not target:
+        await update.message.reply_text("❌ کاربر یافت نشد!")
+        return True
+
+    gift_name = "خرس تدی 🧸" if gtype == 'teddy' else ctx.user_data.get('gift_plan', 'هدیه')
+    clear_user_state(ctx)
+
+    await update.message.reply_text(
+        f"✅ <b>هدیه ارسال شد!</b>\n\n"
+        f"🎁 {html.escape(gift_name)}\n"
+        f"👤 به: {html.escape(target['first_name'] or str(target_id))}\n"
+        f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+        parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+
+    await safe_send(ctx.bot, target_id,
+        f"🎁 <b>شما هدیه دریافت کردید!</b>\n\n"
+        f"🎁 {html.escape(gift_name)}\n"
+        f"👤 از طرف: {html.escape(update.effective_user.first_name or 'ناشناس')}")
+    return True
+
+
+# ══════════════════════════════════════════════
+#            📋 TASKS (تسک‌ها)
+# ══════════════════════════════════════════════
+
+async def msg_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('tasks') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    tasks = db.get_active_tasks()
+
+    text = (
+        f"📋 <b>تسک‌های Dark Point</b>\n"
+        f"{'═' * 30}\n\n"
     )
 
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
+    if not tasks:
+        text += "📭 تسک فعالی وجود ندارد.\nبزودی تسک‌های جدید اضافه می‌شود!"
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        return
 
-    user_display = f"@{user.username}" if user.username else f"<code>{user.id}</code>"
-    log_kb = [[InlineKeyboardButton("🤖 ورود", url=f"https://t.me/{BOT_USERNAME}")]]
-    await send_log(context,
-        f"🛒 <b>سفارش پنل جدید</b>\n\n👤 {user_display}\n🆔 <code>{user.id}</code>\n👥 رفرال: {ref_count}\n📦 {name} ({data_limit})\n💵 <code>{format_number(price)}</code>\n🆔 <code>{order_id}</code>",
-        reply_markup=InlineKeyboardMarkup(log_kb)
-    )
+    rows = []
+    for t in tasks:
+        # Check if user already completed
+        c = db.conn.cursor()
+        c.execute('SELECT status FROM user_tasks WHERE user_id=? AND task_id=?', (uid, t['id']))
+        ut = c.fetchone()
+        status = ut[0] if ut else 'none'
 
-    for admin_id in ADMIN_IDS:
+        if status == 'completed':
+            emoji = "✅"
+            btn_text = f"✅ {t['title']}"
+        elif status == 'pending':
+            emoji = "⏳"
+            btn_text = f"⏳ {t['title']}"
+        else:
+            emoji = "🔲"
+            btn_text = f"🔲 {t['title']} (+{fmt(t['reward'])} DP)"
+            rows.append([InlineKeyboardButton(btn_text, callback_data=f"task_do_{t['id']}")])
+            continue
+
+        text += f"{emoji} {html.escape(t['title'])} — {fmt(t['reward'])} DP\n"
+
+    text += f"\n{'═' * 30}"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+
+
+async def cb_task_do(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    task_id = int(q.data.split('_')[2])
+
+    c = db.conn.cursor()
+    c.execute('SELECT * FROM tasks WHERE id=?', (task_id,))
+    task = c.fetchone()
+    if not task:
+        await q.answer("❌ تسک یافت نشد!", show_alert=True)
+        return
+
+    ttype = task['type']
+
+    if ttype == 'channel':
+        # Channel join task — check membership
+        channel = task['data']
         try:
-            admin_kb = [
-                [InlineKeyboardButton("📤 ارسال کانفیگ", callback_data=f"admin_send_config_{order_id}_{user.id}")],
-                [InlineKeyboardButton("💬 پاسخ", callback_data=f"admin_reply_{user.id}")]
-            ]
-            await context.bot.send_message(
-                admin_id,
-                f"🛒 سفارش پنل\n👤 {user_display}\n🆔 <code>{user.id}</code>\n📦 {name} ({data_limit})\n🆔 <code>{order_id}</code>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(admin_kb)
-            )
+            m = await ctx.bot.get_chat_member(channel, uid)
+            if m.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
+                            ChatMemberStatus.OWNER):
+                if db.complete_task(uid, task_id):
+                    db.check_level_up(uid)
+                    await safe_edit(q,
+                        f"✅ <b>تسک انجام شد!</b>\n\n"
+                        f"📋 {html.escape(task['title'])}\n"
+                        f"💰 پاداش: <b>+{fmt(task['reward'])}</b> DP\n"
+                        f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP")
+                else:
+                    await q.answer("⚠️ قبلاً انجام داده‌اید!", show_alert=True)
+            else:
+                u = channel.lstrip('@')
+                await safe_edit(q,
+                    f"❌ هنوز عضو نشده‌اید!\n\n"
+                    f"📢 ابتدا در {channel} عضو شوید.",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"📢 عضویت در {channel}", url=f"https://t.me/{u}")],
+                        [InlineKeyboardButton("✅ عضو شدم", callback_data=f"task_check_{task_id}")],
+                    ]))
         except Exception:
-            pass
+            await q.answer("❌ خطا در بررسی عضویت!", show_alert=True)
+
+    elif ttype == 'mission':
+        # Screenshot mission — user must send screenshot
+        ctx.user_data['mission_task'] = task_id
+        ctx.user_data['mission_uid'] = uid
+        await safe_edit(q,
+            f"📸 <b>ماموریت: {html.escape(task['title'])}</b>\n\n"
+            f"📝 {html.escape(task['data'])}\n\n"
+            f"📸 اسکرین‌شات انجام ماموریت را ارسال کنید.\n"
+            f"💰 پاداش: {fmt(task['reward'])} DP\n\n"
+            f"⚠️ پس از ارسال، ادمین بررسی می‌کند.")
+
+    else:
+        # Simple task — auto complete
+        if db.complete_task(uid, task_id):
+            db.check_level_up(uid)
+            await safe_edit(q,
+                f"✅ <b>تسک انجام شد!</b>\n\n"
+                f"💰 +<b>{fmt(task['reward'])}</b> DP")
+        else:
+            await q.answer("⚠️ قبلاً انجام داده‌اید!", show_alert=True)
 
 
-# ============ GROUP HANDLERS ============
+async def cb_task_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Re-check channel join for task"""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    task_id = int(q.data.split('_')[2])
 
-async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c = db.conn.cursor()
+    c.execute('SELECT * FROM tasks WHERE id=?', (task_id,))
+    task = c.fetchone()
+    if not task:
+        return
+
+    channel = task['data']
+    try:
+        m = await ctx.bot.get_chat_member(channel, uid)
+        if m.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
+                        ChatMemberStatus.OWNER):
+            if db.complete_task(uid, task_id):
+                db.check_level_up(uid)
+                await safe_edit(q,
+                    f"✅ <b>تسک انجام شد!</b>\n\n"
+                    f"💰 +<b>{fmt(task['reward'])}</b> DP\n"
+                    f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP")
+            else:
+                await q.answer("⚠️ قبلاً انجام شده!", show_alert=True)
+        else:
+            await q.answer("❌ هنوز عضو نشده‌اید!", show_alert=True)
+    except Exception:
+        await q.answer("❌ خطا!", show_alert=True)
+
+
+async def process_mission_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Process mission screenshot"""
+    uid = update.effective_user.id
+    task_id = ctx.user_data.get('mission_task')
+    if not task_id or ctx.user_data.get('mission_uid') != uid:
+        return False
+
+    # Forward photo to admin for approval
+    c = db.conn.cursor()
+    c.execute('INSERT INTO user_tasks (user_id,task_id,status,created_at) VALUES (?,?,?,?)',
+              (uid, task_id, 'pending', int(time.time())))
+    db.conn.commit()
+
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        "✅ اسکرین‌شات ارسال شد!\n⏳ منتظر تأیید ادمین باشید.",
+        reply_markup=main_menu_kb())
+
+    # Notify admin
+    uname = html.escape(update.effective_user.first_name or str(uid))
+    await safe_send(ctx.bot, config.ADMIN_ID,
+        f"📸 <b>ماموریت جدید برای تأیید</b>\n\n"
+        f"👤 {uname} (<code>{uid}</code>)\n"
+        f"📋 تسک ID: {task_id}\n\n"
+        f"⬇️ اسکرین‌شات زیر را بررسی کنید:",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تأیید", callback_data=f"miss_ok_{uid}_{task_id}"),
+             InlineKeyboardButton("❌ رد", callback_data=f"miss_no_{uid}_{task_id}")],
+        ]))
+
+    # Forward the photo to admin
+    try:
+        if update.message.photo:
+            photo = update.message.photo[-1].file_id
+            await ctx.bot.send_photo(config.ADMIN_ID, photo)
+        elif update.message.document:
+            await ctx.bot.send_document(config.ADMIN_ID, update.message.document.file_id)
+    except Exception as e:
+        logger.error(f"Forward mission err: {e}")
+
+    return True
+
+
+# ══════════════════════════════════════════════
+#         👍 LIKE CHALLENGE (چالش لایک)
+# ══════════════════════════════════════════════
+
+async def msg_like(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('like') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    u = db.get_user(uid)
+    cost = config.LIKE_CHALLENGE_COST
+    days = config.LIKE_CHALLENGE_DAYS
+
+    text = (
+        f"👍 <b>چالش لایک</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💰 هزینه ورود: <b>{fmt(cost)}</b> DP\n"
+        f"⏳ مدت: <b>{days}</b> روز\n\n"
+        f"📝 هر روز پست‌های کانال را لایک کنید.\n"
+        f"🎁 در پایان دوره، جایزه ویژه دریافت می‌کنید!\n\n"
+    )
+
+    if u and u['like_challenge_active']:
+        start = u['like_challenge_start']
+        elapsed = int(time.time()) - start
+        rem = max(0, days * 86400 - elapsed)
+        if rem > 0:
+            text += f"🟢 <b>فعال!</b>\n⏳ باقی‌مانده: {seconds_to_hms(rem)}"
+        else:
+            text += "✅ دوره تمام شد! جایزه خود را دریافت کنید."
+    else:
+        text += "🔴 هنوز شرکت نکرده‌اید."
+
+    text += f"\n{'═' * 30}"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "👍 شرکت در چالش" if not (u and u['like_challenge_active']) else "📊 وضعیت",
+            callback_data="like_join" if not (u and u['like_challenge_active']) else "like_status"
+        )],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_like_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    cost = config.LIKE_CHALLENGE_COST
+
+    if not db.deduct_balance(uid, cost):
+        await q.answer(f"❌ موجودی کافی نیست! ({fmt(cost)} DP)", show_alert=True)
+        return
+
+    c = db.conn.cursor()
+    c.execute('UPDATE users SET like_challenge_active=1, like_challenge_start=? WHERE user_id=?',
+              (int(time.time()), uid))
+    db.conn.commit()
+
+    await safe_edit(q,
+        f"✅ <b>در چالش لایک ثبت‌نام کردید!</b>\n\n"
+        f"💰 هزینه: {fmt(cost)} DP\n"
+        f"⏳ مدت: {config.LIKE_CHALLENGE_DAYS} روز\n\n"
+        f"👍 هر روز پست‌های کانال را لایک کنید!")
+
+
+# ══════════════════════════════════════════════
+#         💱 CURRENCY CONVERT (تبدیل ارز)
+# ══════════════════════════════════════════════
+
+async def msg_convert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('convert') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    bal = db.get_balance(uid)
+
+    text = (
+        f"💱 <b>تبدیل ارز به DP</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💎 موجودی: <b>{fmt(bal)}</b> DP\n\n"
+        f"📊 <b>نرخ‌ها:</b>\n"
+        f"   💎 TON → DP: هر 0.01 TON = {fmt(config.TON_TO_DP)} DP\n"
+        f"   💵 USDT → DP: هر 0.01 USDT = {fmt(config.USDT_TO_DP)} DP\n\n"
+        f"📉 <b>حداقل:</b>\n"
+        f"   TON: {config.TON_CONVERT_MIN} | USDT: {config.USDT_CONVERT_MIN}\n"
+        f"{'═' * 30}"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💎 تبدیل TON به DP", callback_data="conv_ton"),
+         InlineKeyboardButton("💵 تبدیل USDT به DP", callback_data="conv_usdt")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_convert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    cur = 'TON' if q.data == 'conv_ton' else 'USDT'
+
+    ctx.user_data['conv_type'] = cur
+    ctx.user_data['conv_uid'] = uid
+
+    min_val = config.TON_CONVERT_MIN if cur == 'TON' else config.USDT_CONVERT_MIN
+    rate = config.TON_TO_DP if cur == 'TON' else config.USDT_TO_DP
+
+    await safe_edit(q,
+        f"💱 <b>تبدیل {cur} به DP</b>\n\n"
+        f"📊 نرخ: هر 0.01 {cur} = {fmt(rate)} DP\n"
+        f"📉 حداقل: {min_val} {cur}\n\n"
+        f"📝 مقدار {cur} را وارد کنید:\n"
+        f"(مثال: <code>1.5</code>)",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ لغو", callback_data="conv_cancel")]
+        ]))
+
+
+async def cb_conv_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    clear_user_state(ctx)
+    await safe_edit(q, "❌ لغو شد.")
+
+
+async def process_convert_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cur = ctx.user_data.get('conv_type')
+    if not cur or ctx.user_data.get('conv_uid') != uid:
+        return False
+
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_kb())
+        return True
+
+    try:
+        amount = float(text)
+    except ValueError:
+        await update.message.reply_text("❌ عدد نامعتبر!")
+        return True
+
+    min_val = config.TON_CONVERT_MIN if cur == 'TON' else config.USDT_CONVERT_MIN
+    rate = config.TON_TO_DP if cur == 'TON' else config.USDT_TO_DP
+
+    if amount < min_val:
+        await update.message.reply_text(f"❌ حداقل: {min_val} {cur}")
+        return True
+
+    dp = int((amount / 0.01) * rate)
+    db.add_balance(uid, dp)
+    db.check_level_up(uid)
+    clear_user_state(ctx)
+
+    await update.message.reply_text(
+        f"✅ <b>تبدیل موفق!</b>\n\n"
+        f"💱 {amount} {cur} → <b>{fmt(dp)}</b> DP\n"
+        f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+        parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+
+    await send_log(ctx.bot,
+        f"💱 <b>تبدیل ارز</b>\n"
+        f"👤 {html.escape(update.effective_user.first_name or str(uid))}\n"
+        f"💱 {amount} {cur} → {fmt(dp)} DP")
+    return True
+
+
+# ══════════════════════════════════════════════
+#         ⭐ STARS WITHDRAWAL (برداشت استارز)
+# ══════════════════════════════════════════════
+
+async def msg_stars(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('stars') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    bal = db.get_balance(uid)
+    stars_price = int(db.get_setting('stars_price', config.STARS_DP_COST))
+    max_stars = bal // stars_price * 50  # 1M DP = 50 stars
+
+    text = (
+        f"⭐ <b>برداشت استارز</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💎 موجودی: <b>{fmt(bal)}</b> DP\n"
+        f"📊 نرخ: <b>{fmt(stars_price)}</b> DP = 50 ⭐\n"
+        f"⭐ حداکثر قابل برداشت: <b>{max_stars}</b> ستاره\n\n"
+        f"{'═' * 30}"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ برداشت 50 ستاره", callback_data="stars_50")],
+        [InlineKeyboardButton("⭐ برداشت 100 ستاره", callback_data="stars_100")],
+        [InlineKeyboardButton("⭐ برداشت 250 ستاره", callback_data="stars_250")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_stars(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    stars_map = {'stars_50': 50, 'stars_100': 100, 'stars_250': 250}
+    stars = stars_map.get(q.data, 0)
+    if not stars:
+        return
+
+    stars_price = int(db.get_setting('stars_price', config.STARS_DP_COST))
+    cost = (stars // 50) * stars_price
+
+    if not db.deduct_balance(uid, cost):
+        await q.answer(f"❌ موجودی کافی نیست! ({fmt(cost)} DP)", show_alert=True)
+        return
+
+    await safe_edit(q,
+        f"✅ <b>درخواست برداشت {stars} ⭐ ثبت شد!</b>\n\n"
+        f"💰 هزینه: {fmt(cost)} DP\n"
+        f"💎 موجودی: {fmt(db.get_balance(uid))} DP\n\n"
+        f"⏳ استارز بزودی ارسال می‌شود.")
+
+    await send_log(ctx.bot,
+        f"⭐ <b>درخواست استارز</b>\n"
+        f"👤 {html.escape(q.from_user.first_name or str(uid))} (<code>{uid}</code>)\n"
+        f"⭐ {stars} ستاره | 💰 {fmt(cost)} DP")
+
+
+# ══════════════════════════════════════════════
+#         💰 BUY DP (خرید DP)
+# ══════════════════════════════════════════════
+
+async def msg_buy_dp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+    if not db.is_section_on('buy_dp') and not is_admin(uid):
+        await update.message.reply_text(section_off_text()); return
+
+    clear_user_state(ctx)
+    dp_amount = int(db.get_setting('buy_dp_amount', config.BUY_DP_DEFAULT_AMOUNT))
+    price = int(db.get_setting('buy_dp_price', config.BUY_DP_DEFAULT_PRICE))
+
+    text = (
+        f"💰 <b>خرید Dark Point</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📦 بسته: <b>{fmt(dp_amount)}</b> DP\n"
+        f"💵 قیمت: <b>{fmt(price)}</b> تومان\n\n"
+        f"📝 برای خرید، روی دکمه زیر کلیک کنید.\n"
+        f"💳 پس از پرداخت، DP به حساب شما واریز می‌شود.\n"
+        f"{'═' * 30}"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"💰 خرید {fmt(dp_amount)} DP ({fmt(price)} تومان)",
+            callback_data="buydp_order"
+        )],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_buydp_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    dp_amount = int(db.get_setting('buy_dp_amount', config.BUY_DP_DEFAULT_AMOUNT))
+    price = int(db.get_setting('buy_dp_price', config.BUY_DP_DEFAULT_PRICE))
+
+    await safe_edit(q,
+        f"💰 <b>سفارش خرید DP</b>\n\n"
+        f"📦 {fmt(dp_amount)} DP\n"
+        f"💵 {fmt(price)} تومان\n\n"
+        f"📝 لطفاً رسید پرداخت را ارسال کنید.\n"
+        f"(عکس یا اسکرین‌شات فیش واریزی)\n\n"
+        f"⚠️ پس از تأیید ادمین، DP واریز می‌شود.")
+
+    ctx.user_data['buydp_uid'] = uid
+    ctx.user_data['buydp_active'] = True
+
+
+async def process_buydp_receipt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Process buy DP receipt photo"""
+    uid = update.effective_user.id
+    if not ctx.user_data.get('buydp_active') or ctx.user_data.get('buydp_uid') != uid:
+        return False
+
+    dp_amount = int(db.get_setting('buy_dp_amount', config.BUY_DP_DEFAULT_AMOUNT))
+    price = int(db.get_setting('buy_dp_price', config.BUY_DP_DEFAULT_PRICE))
+
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        "✅ رسید ارسال شد!\n⏳ منتظر تأیید ادمین باشید.",
+        reply_markup=main_menu_kb())
+
+    # Notify admin
+    uname = html.escape(update.effective_user.first_name or str(uid))
+    admin_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأیید و واریز", callback_data=f"buydp_ok_{uid}_{dp_amount}"),
+         InlineKeyboardButton("❌ رد", callback_data=f"buydp_no_{uid}")],
+    ])
+    await safe_send(ctx.bot, config.ADMIN_ID,
+        f"💰 <b>درخواست خرید DP</b>\n\n"
+        f"👤 {uname} (<code>{uid}</code>)\n"
+        f"📦 {fmt(dp_amount)} DP | 💵 {fmt(price)} تومان\n\n"
+        f"⬇️ رسید زیر را بررسی کنید:", admin_kb)
+
+    try:
+        if update.message.photo:
+            await ctx.bot.send_photo(config.ADMIN_ID, update.message.photo[-1].file_id)
+    except Exception:
+        pass
+    return True# bot.py — Dark Point Bot (قسمت 8/12)
+
+# ══════════════════════════════════════════════
+#         📖 DP PANEL (پنل DP — 12 صفحه)
+# ══════════════════════════════════════════════
+
+DP_PANEL_PAGES = {
+    1: ("📖 <b>Dark Point چیست؟</b>",
+        "Dark Point (DP) ارز داخلی ربات است.\n"
+        "با DP می‌توانید بازی کنید، TON برداشت کنید،\n"
+        "در فروشگاه خرید کنید و خیلی کارهای دیگر!"),
+    2: ("💎 <b>چگونه DP بگیریم؟</b>",
+        "• 🎁 دریافت جایزه هر ۳-۵ دقیقه\n"
+        "• 👥 زیرمجموعه‌گیری\n"
+        "• 🎮 بازی‌ها\n"
+        "• 📋 انجام تسک‌ها\n"
+        "• 🎰 گردونه شانس\n"
+        "• 💰 خرید مستقیم DP"),
+    3: ("💎 <b>برداشت TON</b>",
+        f"نرخ: {fmt(config.TON_WITHDRAWAL_DP_RATE)} DP = {config.TON_WITHDRAWAL_TON_AMOUNT} TON\n"
+        f"حداقل: {config.TON_WITHDRAWAL_MIN} TON\n\n"
+        "با زیرمجموعه‌گیری راحت می‌توانید برداشت کنید!"),
+    4: ("🏦 <b>بانک دارکی</b>",
+        "سپرده‌گذاری DP و دریافت ۳٪ سود هر ۴۸ ساعت.\n"
+        "پس از ۴۸ ساعت می‌توانید اصل + سود را برداشت کنید."),
+    5: ("⛏ <b>ماینر دارکی</b>",
+        "خرید ماینر و استخراج TON یا USDT.\n"
+        "۵ سطح ارتقا | نیاز به برق\n"
+        "هزینه برق: 2,000,000 DP/h"),
+    6: ("🎮 <b>بازی‌ها</b>",
+        "• 💥 کرش (2x/3x/5x)\n"
+        "• 🎲 تاس (1.5x/3x/6x)\n"
+        "• 🔮 حدس بزن (تا 10x)\n"
+        "• 🎰 کازینو (7x/12x/15x)\n"
+        "• 💣 بمب (+0.2x هر خانه امن)\n\n"
+        "⚠️ همه بازی‌ها فقط در گروه!"),
+    7: ("📊 <b>سیستم سطح</b>",
+        "۲۰ سطح از 0 تا 20 میلیارد DP\n"
+        "هر سطح = پاداش سطح × 1,000,000 DP\n"
+        "سطح بالاتر = جایزه بیشتر در کلیم!"),
+    8: ("🛒 <b>فروشگاه</b>",
+        "خرید پلن‌ها و محصولات با DP.\n"
+        "تحویل خودکار پس از خرید."),
+    9: ("👥 <b>زیرمجموعه‌گیری</b>",
+        "با دعوت دوستان DP رایگان بگیرید!\n"
+        "هر رفرال = پاداش DP\n"
+        "هر ورود جدید = پاداش ورود"),
+    10: ("💱 <b>تبدیل ارز</b>",
+         f"TON → DP: هر 0.01 TON = {fmt(config.TON_TO_DP)} DP\n"
+         f"USDT → DP: هر 0.01 USDT = {fmt(config.USDT_TO_DP)} DP"),
+    11: ("⭐ <b>استارز</b>",
+         "تبدیل DP به ستاره تلگرام.\n"
+         f"نرخ: {fmt(config.STARS_DP_COST)} DP = 50 ⭐"),
+    12: ("🏭 <b>کارخانه</b>",
+         "۵ سطح کارخانه\n"
+         "هر ساعت DP تولید می‌کند.\n"
+         "ساخت اولیه رایگان!"),
+}
+
+
+async def msg_dp_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text()); return
+
+    clear_user_state(ctx)
+    title, body = DP_PANEL_PAGES[1]
+    text = f"{title}\n{'─' * 28}\n\n{body}\n\n📄 صفحه 1 / 12"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ قبلی", callback_data="panel_12"),
+         InlineKeyboardButton("➡️ بعدی", callback_data="panel_2")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_dp_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    page = int(q.data.split('_')[1])
+    if page < 1:
+        page = 12
+    if page > 12:
+        page = 1
+
+    title, body = DP_PANEL_PAGES[page]
+    text = f"{title}\n{'─' * 28}\n\n{body}\n\n📄 صفحه {page} / 12"
+
+    prev_page = 12 if page == 1 else page - 1
+    next_page = 1 if page == 12 else page + 1
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ قبلی", callback_data=f"panel_{prev_page}"),
+         InlineKeyboardButton("➡️ بعدی", callback_data=f"panel_{next_page}")],
+    ])
+    await safe_edit(q, text, kb)
+
+
+# ══════════════════════════════════════════════
+#       GROUP COMMANDS (دستورات گروهی)
+# ══════════════════════════════════════════════
+
+async def group_check_and_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Register group and check member count"""
     chat = update.effective_chat
-    for member in update.message.new_chat_members:
-        if member.id == context.bot.id:
-            try:
-                count = await context.bot.get_chat_member_count(chat.id)
-                if count < MIN_GROUP_MEMBERS:
-                    await update.message.reply_text(
-                        f"❌ <b>گروه باید حداقل {MIN_GROUP_MEMBERS} عضو داشته باشد!</b>\n👥 فعلی: {count}",
-                        parse_mode=ParseMode.HTML
-                    )
-                    await context.bot.leave_chat(chat.id)
-                    return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return True  # Private chats always OK
 
-                is_bot_admin = await check_bot_is_admin_in_group(context, chat.id)
-                db.add_or_update_group(chat.id, chat.title, count, 1 if is_bot_admin else 0)
+    # Register group
+    db.add_admin_group(chat.id, chat.title or "گروه")
 
-                if not is_bot_admin:
-                    await update.message.reply_text(
-                        "⚠️ <b>برای فعالیت کامل، ربات را ادمین کنید!</b>\n"
-                        "━━━━━━━━━━━━━━━━━━\n\n"
-                        "🔧 دسترسی‌های لازم: حذف پیام، ارسال پیام",
-                        parse_mode=ParseMode.HTML
-                    )
-                    return
-
-                await update.message.reply_text(
-                    "🏴 ✨ <b>ربات دارک پوینت فعال شد!</b> ✨ 🏴\n"
-                    "━━━━━━━━━━━━━━━━━━\n\n"
-                    "📝 <b>دستورات کسب DP:</b>\n"
-                    "• <code>دارک</code>\n"
-                    "• <code>موجودی</code>\n"
-                    "• <code>پروفایل دارکی</code>\n\n"
-                    "🎮 <b>بازی‌ها:</b>\n"
-                    "• <code>بازی 1000</code>\n"
-                    "• <code>انفجار 1000</code>\n"
-                    "• <code>تاس 15000</code>\n"
-                    "• <code>حدس بزن</code>\n"
-                    "• <code>کازینو</code>\n"
-                    "• <code>بمب</code>\n"
-                    "• <code>فوتبال</code>\n\n"
-                    "⚒ <b>ماینر:</b>\n"
-                    "• <code>ماینر دارکی</code>\n\n"
-                    "🏦 <b>سایر:</b>\n"
-                    "• <code>انتقال 1000</code>\n"
-                    "• <code>بانک دارکی</code>\n"
-                    "• <code>کارخونه دارکی</code>\n"
-                    "• <code>لیدربورد</code>",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception as e:
-                logger.error(f"Group error: {e}")
+    # Check member count
+    try:
+        count = await ctx.bot.get_chat_member_count(chat.id)
+        if count < config.MIN_GROUP_MEMBERS:
+            await update.message.reply_text(
+                f"⚠️ تعداد اعضای گروه کمتر از {config.MIN_GROUP_MEMBERS} نفر است.\n"
+                f"📊 اعضای فعلی: {count}\n\n"
+                f"⚠️ ربات به زودی گروه را ترک می‌کند!")
+            # Schedule leave (don't leave immediately to avoid spam)
+            return False
+    except Exception:
+        pass
+    return True
 
 
-async def check_group_requirements(update, context):
-    """چک شرایط گروه - اعضا و ادمین بودن"""
+async def cmd_dark(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """دارک / دارک کانفیگ — group info command"""
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.message.reply_text("⚠️ این دستور فقط در گروه کار می‌کند!")
+        return
+
     chat = update.effective_chat
     try:
-        count = await context.bot.get_chat_member_count(chat.id)
-        if count < MIN_GROUP_MEMBERS:
-            await update.message.reply_text(f"❌ گروه باید حداقل {MIN_GROUP_MEMBERS} عضو داشته باشد!")
-            return False
+        count = await ctx.bot.get_chat_member_count(chat.id)
+    except Exception:
+        count = "؟"
 
-        is_bot_admin = await check_bot_is_admin_in_group(context, chat.id)
-        if not is_bot_admin:
-            await update.message.reply_text(
-                "⚠️ <b>اول ربات را در گروه ادمین کنید!</b>",
-                parse_mode=ParseMode.HTML
-            )
-            db.update_group_admin_status(chat.id, 0)
-            return False
+    bot_user = await ctx.bot.get_me()
+    text = (
+        f"🌑 <b>Dark Point Bot</b>\n"
+        f"{'─' * 28}\n\n"
+        f"👥 اعضای گروه: <b>{count}</b>\n"
+        f"🏷 نام گروه: {html.escape(chat.title or '—')}\n\n"
+        f"💎 برای دریافت DP رایگان:\n"
+        f"به @{bot_user.username} پیام دهید!\n\n"
+        f"🎮 دستورات بازی:\n"
+        f"• <code>بازی [مبلغ]</code> — کرش\n"
+        f"• <code>تاس [مبلغ]</code> — تاس\n"
+        f"• <code>حدس بزن [مبلغ]</code> — حدس\n"
+        f"• <code>کازینو [مبلغ]</code> — کازینو\n"
+        f"• <code>بمب [مبلغ]</code> — بمب\n"
+        f"• <code>انتقال [مبلغ]</code> — انتقال DP"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-        db.add_or_update_group(chat.id, chat.title, count, 1)
+
+async def cmd_balance_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """موجودی — show balance in group"""
+    uid = update.effective_user.id
+    db.create_user(uid, update.effective_user.username or "",
+                   update.effective_user.first_name or "")
+    bal = db.get_balance(uid)
+    lvl = db.get_user_level(uid)
+    ton_eq = dp_to_ton(bal)
+    name = html.escape(update.effective_user.first_name or "کاربر")
+
+    await update.message.reply_text(
+        f"💎 <b>موجودی {name}</b>\n\n"
+        f"💰 {fmt(bal)} DP\n"
+        f"💎 ≈ {ton_eq:.6f} TON\n"
+        f"📊 سطح: {lvl}",
+        parse_mode=ParseMode.HTML)
+
+
+async def cmd_profile_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """پروفایل دارکی — show profile in group"""
+    uid = update.effective_user.id
+    db.create_user(uid, update.effective_user.username or "",
+                   update.effective_user.first_name or "")
+    u = db.get_user(uid)
+    if not u:
+        return
+
+    bal = u['balance']
+    lvl = db.get_user_level(uid)
+    name = html.escape(update.effective_user.first_name or "کاربر")
+
+    await update.message.reply_text(
+        f"👤 <b>پروفایل {name}</b>\n"
+        f"{'─' * 28}\n\n"
+        f"🆔 <code>{uid}</code>\n"
+        f"💎 {fmt(bal)} DP\n"
+        f"📊 سطح: {lvl} / 20\n"
+        f"👥 رفرال: {u['referrals']}\n"
+        f"🏆 کل درآمد: {fmt(u['total_earned'])} DP",
+        parse_mode=ParseMode.HTML)
+
+
+async def cmd_leaderboard_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """لیدربورد — in group"""
+    top = db.get_top_users(5)
+    if not top:
+        await update.message.reply_text("📊 هنوز داده‌ای نیست.")
+        return
+
+    medals = ["🥇", "🥈", "🥉", "4.", "5."]
+    text = "🏆 <b>لیدربورد</b>\n\n"
+    for i, u in enumerate(top):
+        name = html.escape(u['username'] or u['first_name'] or str(u['user_id']))
+        text += f"{medals[i]} @{name} — {fmt(u['balance'])} DP\n"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def cmd_id_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """ایدی عددی — admin reply to get user ID"""
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("⚠️ روی پیام کاربر ریپلای کنید!")
+        return
+    target = update.message.reply_to_message.from_user
+    await update.message.reply_text(
+        f"🆔 آیدی عددی <b>{html.escape(target.first_name or '')}</b>:\n"
+        f"<code>{target.id}</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def cmd_miner_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """ماینر دارکی — quick miner info in group"""
+    uid = update.effective_user.id
+    m = db.get_miner(uid)
+    name = html.escape(update.effective_user.first_name or "کاربر")
+    if not m:
+        await update.message.reply_text(f"⛏ {name} ماینر ندارد!")
+        return
+    now = int(time.time())
+    elec = max(0, m['electricity_end'] - now)
+    status = "🟢" if elec > 0 else "🔴"
+    await update.message.reply_text(
+        f"⛏ <b>ماینر {name}</b>\n"
+        f"📊 L{m['level']} | {m['currency']} | {status} {seconds_to_hms(elec)}",
+        parse_mode=ParseMode.HTML)
+
+
+async def cmd_bank_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """بانک دارکی — quick bank info in group"""
+    uid = update.effective_user.id
+    deps = db.get_bank_deposits(uid)
+    name = html.escape(update.effective_user.first_name or "کاربر")
+    if not deps:
+        await update.message.reply_text(f"🏦 {name} سپرده‌ای ندارد.")
+        return
+    total = sum(d['amount'] for d in deps)
+    await update.message.reply_text(
+        f"🏦 <b>بانک {name}</b>\n"
+        f"📋 {len(deps)} سپرده | 💰 {fmt(total)} DP",
+        parse_mode=ParseMode.HTML)
+
+
+# ══════════════════════════════════════════════
+#     ➕ ADD TO GROUP (افزودن به گروه)
+# ══════════════════════════════════════════════
+
+async def msg_add_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    bot_user = await ctx.bot.get_me()
+    link = f"https://t.me/{bot_user.username}?startgroup=darkpoint"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ افزودن ربات به گروه", url=link)],
+    ])
+    await update.message.reply_text(
+        "➕ <b>افزودن به گروه</b>\n\n"
+        "🌑 ربات Dark Point را به گروه خود اضافه کنید!\n\n"
+        "📋 <b>شرایط:</b>\n"
+        f"• حداقل {config.MIN_GROUP_MEMBERS} عضو\n"
+        "• ربات باید ادمین باشد\n"
+        "• بازی‌ها فقط در گروه فعال هستند\n\n"
+        "⚠️ اگر تعداد اعضا کمتر از حد مجاز شود،\n"
+        "ربات گروه را ترک می‌کند.",
+        parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+# ══════════════════════════════════════════════
+#     GROUP MEMBER CHECK (بررسی اعضای گروه)
+# ══════════════════════════════════════════════
+
+async def check_group_members_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Periodic job: check all registered groups for min members"""
+    groups = db.get_admin_groups()
+    for g in groups:
+        try:
+            count = await ctx.bot.get_chat_member_count(g['chat_id'])
+            if count < config.MIN_GROUP_MEMBERS:
+                await ctx.bot.send_message(
+                    g['chat_id'],
+                    f"⚠️ تعداد اعضا ({count}) کمتر از {config.MIN_GROUP_MEMBERS} شد.\n"
+                    f"👋 ربات گروه را ترک می‌کند.")
+                await ctx.bot.leave_chat(g['chat_id'])
+                db.remove_admin_group(g['chat_id'])
+                logger.info(f"Left group {g['chat_id']} ({count} members)")
+        except Forbidden:
+            db.remove_admin_group(g['chat_id'])
+            logger.info(f"Removed banned group {g['chat_id']}")
+        except Exception as e:
+            logger.warning(f"Group check err {g['chat_id']}: {e}")
+
+
+async def on_chat_member_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle bot being added/removed from groups"""
+    if not update.my_chat_member:
+        return
+    chat = update.my_chat_member.chat
+    new_status = update.my_chat_member.new_chat_member.status
+
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+            db.add_admin_group(chat.id, chat.title or "گروه")
+            try:
+                await ctx.bot.send_message(
+                    chat.id,
+                    f"🌑 <b>Dark Point Bot</b> به گروه اضافه شد!\n\n"
+                    f"📝 دستور <code>دارک</code> را بفرستید.\n"
+                    f"⚠️ حداقل {config.MIN_GROUP_MEMBERS} عضو لازم است.",
+                    parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+            db.remove_admin_group(chat.id)# bot.py — Dark Point Bot (قسمت 9/12)
+
+# ══════════════════════════════════════════════
+#     ⚙️ ADMIN PANEL — PART 1
+# ══════════════════════════════════════════════
+
+def _admin_check(uid):
+    return uid == config.ADMIN_ID
+
+
+# ──────────────── Admin Router (text messages) ────────────────
+async def admin_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Route admin text messages to appropriate handlers"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    uid = update.effective_user.id
+    if not _admin_check(uid):
+        return
+
+    text = (update.message.text or "").strip()
+
+    # First check if admin is in a flow
+    if ctx.user_data.get('admin_broadcast'):
+        await process_admin_broadcast(update, ctx)
+        return
+    if ctx.user_data.get('admin_broadcast_group'):
+        await process_admin_broadcast_group(update, ctx)
+        return
+    if ctx.user_data.get('admin_add_dp'):
+        await process_admin_add_dp(update, ctx)
+        return
+    if ctx.user_data.get('admin_deduct_dp'):
+        await process_admin_deduct_dp(update, ctx)
+        return
+    if ctx.user_data.get('admin_search'):
+        await process_admin_search(update, ctx)
+        return
+    if ctx.user_data.get('admin_ban'):
+        await process_admin_ban(update, ctx)
+        return
+    if ctx.user_data.get('admin_unban'):
+        await process_admin_unban(update, ctx)
+        return
+    if ctx.user_data.get('admin_send_user'):
+        await process_admin_send_user(update, ctx)
+        return
+    if ctx.user_data.get('admin_reply'):
+        await process_admin_reply(update, ctx)
+        return
+    if ctx.user_data.get('admin_force_add'):
+        await process_admin_force_add(update, ctx)
+        return
+    if ctx.user_data.get('admin_force_remove'):
+        await process_admin_force_remove(update, ctx)
+        return
+    if ctx.user_data.get('admin_task_add'):
+        await process_admin_task_add(update, ctx)
+        return
+    if ctx.user_data.get('admin_shop_add'):
+        await process_admin_shop_add(update, ctx)
+        return
+    if ctx.user_data.get('admin_gift_add'):
+        await process_admin_gift_add(update, ctx)
+        return
+    if ctx.user_data.get('admin_buydp_set'):
+        await process_admin_buydp_set(update, ctx)
+        return
+    if ctx.user_data.get('admin_panel_plan'):
+        await process_admin_panel_plan(update, ctx)
+        return
+    if ctx.user_data.get('admin_gift_top'):
+        await process_admin_gift_top(update, ctx)
+        return
+    if ctx.user_data.get('admin_gift_all'):
+        await process_admin_gift_all(update, ctx)
+        return
+
+    # Menu button routing
+    await _admin_menu_button(update, ctx, text)
+
+
+async def _admin_menu_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
+    """Handle admin menu button presses"""
+    uid = update.effective_user.id
+
+    if text == "🔙 بازگشت به منو":
+        clear_user_state(ctx)
+        await update.message.reply_text("🔙 منوی اصلی:", reply_markup=main_menu_kb())
+        return
+
+    if text == "📊 آمار ربات":
+        await _admin_stats(update, ctx)
+    elif text == "💎 آمار برداشت TON":
+        await msg_tw_stats(update, ctx)
+    elif text == "⛏ آمار ماینینگ":
+        await _admin_miner_stats(update, ctx)
+    elif text == "💱 آمار ارز":
+        await _admin_currency_stats(update, ctx)
+    elif text == "📢 ارسال همگانی":
+        await _admin_broadcast_start(update, ctx)
+    elif text == "📣 ارسال به گروه‌ها":
+        await _admin_broadcast_group_start(update, ctx)
+    elif text == "💰 افزودن DP":
+        await _admin_add_dp_start(update, ctx)
+    elif text == "➖ کسر DP":
+        await _admin_deduct_dp_start(update, ctx)
+    elif text == "🔍 جستجوی کاربر":
+        await _admin_search_start(update, ctx)
+    elif text == "👤 ارسال به کاربر":
+        await _admin_send_user_start(update, ctx)
+    elif text == "🚫 بن کاربر":
+        await _admin_ban_start(update, ctx)
+    elif text == "✅ آنبان":
+        await _admin_unban_start(update, ctx)
+    elif text == "📢 فورس جوین":
+        await _admin_force_join(update, ctx)
+    elif text == "📋 گروه‌های من":
+        await _admin_groups_list(update, ctx)
+    elif text == "📋 مدیریت تسک‌ها":
+        await _admin_tasks_manage(update, ctx)
+    elif text == "✅ تایید ماموریت":
+        await _admin_missions_pending(update, ctx)
+    elif text == "🛒 مدیریت فروشگاه":
+        await _admin_shop_manage(update, ctx)
+    elif text == "🎁 مدیریت هدایا":
+        await _admin_gift_manage(update, ctx)
+    elif text == "💰 تنظیم خرید DP":
+        await _admin_buydp_settings(update, ctx)
+    elif text == "⭐ تنظیم استارز":
+        await _admin_stars_settings(update, ctx)
+    elif text == "📦 پلن‌های پنل":
+        await _admin_panel_plans(update, ctx)
+    elif text == "🏷 پاداش رفرال":
+        await _admin_referral_settings(update, ctx)
+    elif text == "⚙️ روشن/خاموش بخش‌ها":
+        await update.message.reply_text(
+            "⚙️ <b>مدیریت بخش‌ها</b>\n\n"
+            "🟢 = روشن | 🔴 = خاموش",
+            parse_mode=ParseMode.HTML,
+            reply_markup=sections_toggle_kb())
+    elif text == "🔌 ربات روشن/خاموش":
+        current = db.is_bot_on()
+        db.set_setting('bot_on', '0' if current else '1')
+        state = "🔴 خاموش" if current else "🟢 روشن"
+        await update.message.reply_text(
+            f"🔌 ربات {state} شد!",
+            reply_markup=admin_menu_kb())
+    elif text == "💾 بکاپ":
+        await _admin_backup(update, ctx)
+    elif text == "♻️ ریستور":
+        await update.message.reply_text(
+            "♻️ <b>ریستور دیتابیس</b>\n\n"
+            "فایل بکاپ (.db) را ارسال کنید.\n"
+            "⚠️ دیتابیس فعلی جایگزین می‌شود!",
+            parse_mode=ParseMode.HTML)
+        ctx.user_data['admin_restore'] = True
+    elif text == "🎁 هدیه به برترین‌ها":
+        await _admin_gift_top_start(update, ctx)
+    elif text == "🎁 هدیه به همه":
+        await _admin_gift_all_start(update, ctx)
+    elif text == "💬 پاسخ به کاربر":
+        await _admin_reply_start(update, ctx)
+    elif text == "📜 سفارش‌های اخیر":
+        await _admin_recent_orders(update, ctx)
+
+
+# ──────────────── Stats ────────────────
+async def _admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    stats = db.get_total_stats()
+    ton_stats = db.get_ton_stats()
+    miner_stats = db.get_miner_stats()
+
+    text = (
+        f"📊 <b>آمار کلی ربات</b>\n"
+        f"{'═' * 30}\n\n"
+        f"👥 کل کاربران: <b>{fmt(stats['users'])}</b>\n"
+        f"💎 کل DP در گردش: <b>{fmt(stats['balance'])}</b>\n"
+        f"👥 کل رفرال‌ها: <b>{fmt(stats['refs'])}</b>\n\n"
+        f"💎 <b>برداشت TON:</b>\n"
+        f"   ✅ انجام شده: {ton_stats['ok']}\n"
+        f"   ⏳ در انتظار: {ton_stats['pending']}\n"
+        f"   ❌ رد شده: {ton_stats['rejected']}\n"
+        f"   💎 کل TON: {ton_stats['ton']:.4f}\n\n"
+        f"⛏ <b>ماینینگ:</b>\n"
+        f"   👥 ماینرها: {miner_stats['count']}\n"
+        f"   💎 TON: {miner_stats['ton']:.6f}\n"
+        f"   💵 USDT: {miner_stats['usdt']:.4f}\n"
+        f"{'═' * 30}"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=admin_menu_kb())
+
+
+async def _admin_miner_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    stats = db.get_miner_stats()
+    c = db.conn.cursor()
+    c.execute('SELECT level, COUNT(*) FROM miners GROUP BY level ORDER BY level')
+    levels = c.fetchall()
+
+    text = (
+        f"⛏ <b>آمار ماینینگ</b>\n"
+        f"{'═' * 30}\n\n"
+        f"👥 کل ماینرها: <b>{stats['count']}</b>\n"
+        f"💎 کل TON: <b>{stats['ton']:.6f}</b>\n"
+        f"💵 کل USDT: <b>{stats['usdt']:.4f}</b>\n\n"
+        f"📊 <b>توزیع سطوح:</b>\n"
+    )
+    for lv in levels:
+        text += f"   L{lv[0]}: {lv[1]} ماینر\n"
+    text += f"{'═' * 30}"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=admin_menu_kb())
+
+
+async def _admin_currency_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    c = db.conn.cursor()
+    c.execute('SELECT COUNT(*), COALESCE(SUM(balance),0) FROM users WHERE balance > 0')
+    active = c.fetchone()
+    c.execute('SELECT MAX(balance) FROM users')
+    max_bal = c.fetchone()[0] or 0
+    c.execute('SELECT user_id, username, balance FROM users ORDER BY balance DESC LIMIT 1')
+    top = c.fetchone()
+
+    text = (
+        f"💱 <b>آمار ارز</b>\n"
+        f"{'═' * 30}\n\n"
+        f"👥 کاربران فعال: <b>{active[0]}</b>\n"
+        f"💎 کل DP: <b>{fmt(active[1])}</b>\n"
+        f"🏆 بیشترین موجودی: <b>{fmt(max_bal)}</b> DP\n"
+    )
+    if top:
+        name = top[1] or str(top[0])
+        text += f"👤 ثروتمندترین: @{html.escape(name)}\n"
+    text += f"{'═' * 30}"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=admin_menu_kb())
+
+
+# ──────────────── Broadcast ────────────────
+async def _admin_broadcast_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_broadcast'] = True
+    await update.message.reply_text(
+        "📢 <b>ارسال همگانی</b>\n\n"
+        "📝 پیام مورد نظر را ارسال کنید.\n"
+        "📎 می‌توانید عکس، ویدیو، فایل یا متن بفرستید.\n\n"
+        "❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        ctx.user_data.pop('admin_broadcast', None)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
         return True
+
+    ctx.user_data.pop('admin_broadcast', None)
+    users = db.get_all_users()
+    sent = 0
+    failed = 0
+
+    await update.message.reply_text(f"⏳ در حال ارسال به {len(users)} کاربر...")
+
+    for uid in users:
+        try:
+            if update.message.photo:
+                await ctx.bot.send_photo(uid, update.message.photo[-1].file_id,
+                                         caption=update.message.caption or "")
+            elif update.message.video:
+                await ctx.bot.send_video(uid, update.message.video.file_id,
+                                         caption=update.message.caption or "")
+            elif update.message.document:
+                await ctx.bot.send_document(uid, update.message.document.file_id,
+                                            caption=update.message.caption or "")
+            else:
+                await ctx.bot.send_message(uid, text, parse_mode=ParseMode.HTML)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)  # Rate limit
+
+    await update.message.reply_text(
+        f"✅ <b>ارسال همگانی تمام شد!</b>\n\n"
+        f"📤 ارسال شده: <b>{sent}</b>\n"
+        f"❌ ناموفق: <b>{failed}</b>\n"
+        f"👥 کل: <b>{len(users)}</b>",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Broadcast to Groups ────────────────
+async def _admin_broadcast_group_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_broadcast_group'] = True
+    groups = db.get_admin_groups()
+    await update.message.reply_text(
+        f"📣 <b>ارسال به گروه‌ها</b>\n\n"
+        f"📋 تعداد گروه‌ها: {len(groups)}\n\n"
+        f"📝 پیام مورد نظر را ارسال کنید:\n"
+        f"❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_broadcast_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        ctx.user_data.pop('admin_broadcast_group', None)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    ctx.user_data.pop('admin_broadcast_group', None)
+    groups = db.get_admin_groups()
+    sent = 0
+    failed = 0
+
+    for g in groups:
+        try:
+            if update.message.photo:
+                await ctx.bot.send_photo(g['chat_id'], update.message.photo[-1].file_id,
+                                         caption=update.message.caption or "")
+            else:
+                await ctx.bot.send_message(g['chat_id'], text, parse_mode=ParseMode.HTML)
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(
+        f"✅ ارسال به گروه‌ها!\n📤 {sent} | ❌ {failed}",
+        reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Add DP ────────────────
+async def _admin_add_dp_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_add_dp'] = True
+    await update.message.reply_text(
+        "💰 <b>افزودن DP</b>\n\n"
+        "📝 فرمت: <code>آیدی مبلغ</code>\n"
+        "مثال: <code>123456789 1000000</code>\n\n"
+        "❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_add_dp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        ctx.user_data.pop('admin_add_dp', None)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ فرمت: <code>آیدی مبلغ</code>", parse_mode=ParseMode.HTML)
+        return True
+
+    try:
+        uid = int(parts[0])
+        amount = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ اعداد نامعتبر!")
+        return True
+
+    db.create_user(uid, "", "")
+    db.add_balance(uid, amount)
+    db.check_level_up(uid)
+
+    ctx.user_data.pop('admin_add_dp', None)
+    await update.message.reply_text(
+        f"✅ <b>{fmt(amount)}</b> DP به کاربر <code>{uid}</code> اضافه شد!\n"
+        f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+
+    await safe_send(ctx.bot, uid,
+        f"💰 <b>{fmt(amount)}</b> DP به حساب شما اضافه شد!\n"
+        f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP")
+    return True
+
+
+# ──────────────── Deduct DP ────────────────
+async def _admin_deduct_dp_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_deduct_dp'] = True
+    await update.message.reply_text(
+        "➖ <b>کسر DP</b>\n\n"
+        "📝 فرمت: <code>آیدی مبلغ</code>\n"
+        "مثال: <code>123456789 500000</code>\n\n"
+        "❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_deduct_dp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        ctx.user_data.pop('admin_deduct_dp', None)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ فرمت: <code>آیدی مبلغ</code>", parse_mode=ParseMode.HTML)
+        return True
+
+    try:
+        uid = int(parts[0])
+        amount = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ اعداد نامعتبر!")
+        return True
+
+    if db.deduct_balance(uid, amount):
+        ctx.user_data.pop('admin_deduct_dp', None)
+        await update.message.reply_text(
+            f"✅ <b>{fmt(amount)}</b> DP از کاربر <code>{uid}</code> کسر شد!\n"
+            f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP",
+            parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+        await safe_send(ctx.bot, uid,
+            f"➖ <b>{fmt(amount)}</b> DP از حساب شما کسر شد.\n"
+            f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP")
+    else:
+        await update.message.reply_text("❌ موجودی کاربر کافی نیست!")
+    return True
+
+
+# ──────────────── Search User ────────────────
+async def _admin_search_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_search'] = True
+    await update.message.reply_text(
+        "🔍 <b>جستجوی کاربر</b>\n\n"
+        "📝 آیدی عددی یا یوزرنیم را وارد کنید:\n"
+        "❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        ctx.user_data.pop('admin_search', None)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    ctx.user_data.pop('admin_search', None)
+    results = db.search_user(text)
+
+    if not results:
+        await update.message.reply_text("❌ کاربری یافت نشد!", reply_markup=admin_menu_kb())
+        return True
+
+    for u in results:
+        bal = u['balance']
+        lvl = db.get_user_level(u['user_id'])
+        ton_eq = dp_to_ton(bal)
+        info = (
+            f"👤 <b>اطلاعات کاربر</b>\n"
+            f"{'─' * 28}\n\n"
+            f"🆔 آیدی: <code>{u['user_id']}</code>\n"
+            f"👤 نام: {html.escape(u['first_name'] or '—')}\n"
+            f"🔖 یوزرنیم: @{html.escape(u['username'] or '—')}\n"
+            f"💎 موجودی: <b>{fmt(bal)}</b> DP\n"
+            f"💰 معادل TON: <b>{ton_eq:.6f}</b>\n"
+            f"📊 سطح: <b>{lvl}</b>\n"
+            f"👥 رفرال: {u['referrals']}\n"
+            f"🏆 کل درآمد: {fmt(u['total_earned'])} DP\n"
+            f"🚫 بن: {'✅ بله' if u['is_banned'] else '❌ خیر'}\n"
+            f"📅 عضویت: {datetime.fromtimestamp(u['created_at']).strftime('%Y-%m-%d') if u['created_at'] else '—'}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💰 +DP", callback_data=f"adm_add_{u['user_id']}"),
+             InlineKeyboardButton("➖ -DP", callback_data=f"adm_sub_{u['user_id']}")],
+            [InlineKeyboardButton("🚫 بن" if not u['is_banned'] else "✅ آنبان",
+                                  callback_data=f"adm_ban_{u['user_id']}")],
+        ])
+        await update.message.reply_text(info, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    return True
+
+
+# ──────────────── Ban / Unban ────────────────
+async def _admin_ban_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_ban'] = True
+    await update.message.reply_text(
+        "🚫 <b>بن کاربر</b>\n\n"
+        "📝 آیدی عددی کاربر را وارد کنید:\n"
+        "❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        ctx.user_data.pop('admin_ban', None)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    try:
+        uid = int(text)
+    except ValueError:
+        await update.message.reply_text("❌ آیدی نامعتبر!")
+        return True
+
+    db.ban_user(uid, True)
+    ctx.user_data.pop('admin_ban', None)
+    await update.message.reply_text(
+        f"🚫 کاربر <code>{uid}</code> بن شد!",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    await safe_send(ctx.bot, uid, "🚫 شما از ربات بن شده‌اید.")
+    return True
+
+
+async def _admin_unban_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_unban'] = True
+    await update.message.reply_text(
+        "✅ <b>آنبان کاربر</b>\n\n"
+        "📝 آیدی عددی کاربر را وارد کنید:\n"
+        "❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        ctx.user_data.pop('admin_unban', None)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    try:
+        uid = int(text)
+    except ValueError:
+        await update.message.reply_text("❌ آیدی نامعتبر!")
+        return True
+
+    db.ban_user(uid, False)
+    ctx.user_data.pop('admin_unban', None)
+    await update.message.reply_text(
+        f"✅ کاربر <code>{uid}</code> آنبان شد!",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    await safe_send(ctx.bot, uid, "✅ بن شما لغو شد! خوش آمدید.")
+    return True
+
+
+# ──────────────── Send to Specific User ────────────────
+async def _admin_send_user_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_send_user'] = 'id'
+    await update.message.reply_text(
+        "👤 <b>ارسال به کاربر</b>\n\n"
+        "📝 آیدی عددی کاربر را وارد کنید:",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_send_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    step = ctx.user_data.get('admin_send_user')
+
+    if step == 'id':
+        try:
+            uid = int(text)
+        except ValueError:
+            await update.message.reply_text("❌ آیدی نامعتبر!")
+            return True
+        ctx.user_data['admin_send_user'] = 'msg'
+        ctx.user_data['admin_send_target'] = uid
+        await update.message.reply_text(f"📝 پیام خود را برای <code>{uid}</code> بنویسید:")
+        return True
+
+    elif step == 'msg':
+        target = ctx.user_data.get('admin_send_target')
+        clear_user_state(ctx)
+        ok = await safe_send(ctx.bot, target,
+            f"📨 <b>پیام از طرف ادمین:</b>\n\n{text}")
+        if ok:
+            await update.message.reply_text("✅ پیام ارسال شد!", reply_markup=admin_menu_kb())
+        else:
+            await update.message.reply_text("❌ ارسال ناموفق!", reply_markup=admin_menu_kb())
+        return True
+
+    return False
+
+
+# ──────────────── Reply to User ────────────────
+async def _admin_reply_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_reply'] = 'id'
+    await update.message.reply_text(
+        "💬 <b>پاسخ به کاربر</b>\n\n"
+        "📝 آیدی عددی کاربر را وارد کنید:",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    step = ctx.user_data.get('admin_reply')
+
+    if step == 'id':
+        try:
+            uid = int(text)
+        except ValueError:
+            await update.message.reply_text("❌ آیدی نامعتبر!")
+            return True
+        ctx.user_data['admin_reply'] = 'msg'
+        ctx.user_data['admin_reply_target'] = uid
+        await update.message.reply_text(f"📝 پاسخ خود را برای <code>{uid}</code> بنویسید:")
+        return True
+
+    elif step == 'msg':
+        target = ctx.user_data.get('admin_reply_target')
+        clear_user_state(ctx)
+        await safe_send(ctx.bot, target,
+            f"💬 <b>پاسخ پشتیبانی:</b>\n\n{text}")
+        await update.message.reply_text("✅ پاسخ ارسال شد!", reply_markup=admin_menu_kb())
+        return True
+
+    return False
+
+
+# ──────────────── Backup & Restore ────────────────
+async def _admin_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ در حال تهیه بکاپ...")
+    try:
+        db.conn.commit()  # Ensure all data is written
+        with open(config.DB_PATH, 'rb') as f:
+            await ctx.bot.send_document(
+                config.ADMIN_ID,
+                document=f,
+                filename=f"darkpoint_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                caption="💾 بکاپ دیتابیس Dark Point Bot")
+        await update.message.reply_text("✅ بکاپ ارسال شد!", reply_markup=admin_menu_kb())
     except Exception as e:
-        logger.error(f"Check group error: {e}")
+        await update.message.reply_text(f"❌ خطا: {e}", reply_markup=admin_menu_kb())
+
+
+async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Backup command"""
+    if not _admin_check(update.effective_user.id):
+        return
+    await _admin_backup(update, ctx)
+
+
+async def process_admin_restore(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Process DB restore from document"""
+    if not ctx.user_data.get('admin_restore'):
+        return False
+    if not update.message.document:
+        return False
+
+    ctx.user_data.pop('admin_restore', None)
+    await update.message.reply_text("⏳ در حال ریستور...")
+
+    try:
+        file = await ctx.bot.get_file(update.message.document.file_id)
+        temp_path = config.DB_PATH + ".tmp"
+        await file.download_to_drive(temp_path)
+
+        # Close current connection
+        db.conn.close()
+
+        # Replace DB file
+        import shutil
+        shutil.move(temp_path, config.DB_PATH)
+
+        # Reinitialize
+        db.__init__()
+
+        await update.message.reply_text(
+            "✅ <b>دیتابیس با موفقیت ریستور شد!</b>",
+            parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    except Exception as e:
+        logger.error(f"Restore err: {e}")
+        # Try to reopen original DB
+        try:
+            db.__init__()
+        except Exception:
+            pass
+        await update.message.reply_text(f"❌ خطا در ریستور: {e}", reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Recent Orders ────────────────
+async def _admin_recent_orders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    c = db.conn.cursor()
+    c.execute('SELECT * FROM ton_withdrawals ORDER BY created_at DESC LIMIT 10')
+    orders = c.fetchall()
+
+    c.execute('SELECT * FROM shop_orders ORDER BY created_at DESC LIMIT 5')
+    shop_orders = c.fetchall()
+
+    text = "📜 <b>سفارش‌های اخیر</b>\n" + "═" * 30 + "\n\n"
+
+    if orders:
+        text += "💎 <b>برداشت TON:</b>\n"
+        status_emoji = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}
+        for o in orders[:5]:
+            se = status_emoji.get(o['status'], '❓')
+            text += f"  {se} {o['tracking_code']} | {o['ton_amount']} TON | @{html.escape(o['username'])}\n"
+    else:
+        text += "💎 برداشت TON: —\n"
+
+    text += f"\n🛒 <b>فروشگاه:</b> {len(shop_orders)} سفارش اخیر\n"
+    text += f"{'═' * 30}"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=admin_menu_kb())
+
+
+# ──────────────── Admin Callback Buttons ────────────────
+async def cb_admin_actions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle admin inline buttons from search results, etc."""
+    q = update.callback_query
+    await q.answer()
+    if not _admin_check(q.from_user.id):
+        return
+
+    data = q.data
+
+    if data == "admin_back":
+        await safe_edit(q, "⚙️ پنل مدیریت", admin_menu_kb())
+        return
+
+    # Section toggle
+    if data.startswith("toggle_sec_"):
+        section = data.replace("toggle_sec_", "")
+        current = db.is_section_on(section)
+        db.set_setting(f'section_{section}', '0' if current else '1')
+        await safe_edit(q,
+            "⚙️ <b>مدیریت بخش‌ها</b>\n\n🟢 = روشن | 🔴 = خاموش",
+            sections_toggle_kb())
+        return
+
+    # Quick add/sub from search
+    if data.startswith("adm_add_"):
+        uid = int(data.replace("adm_add_", ""))
+        ctx.user_data['admin_add_dp'] = True
+        ctx.user_data['admin_add_target'] = uid
+        await safe_edit(q, f"💰 مبلغ DP برای افزودن به <code>{uid}</code> را وارد کنید:")
+        return
+
+    if data.startswith("adm_sub_"):
+        uid = int(data.replace("adm_sub_", ""))
+        ctx.user_data['admin_deduct_dp'] = True
+        ctx.user_data['admin_deduct_target'] = uid
+        await safe_edit(q, f"➖ مبلغ DP برای کسر از <code>{uid}</code> را وارد کنید:")
+        return
+
+    if data.startswith("adm_ban_"):
+        uid = int(data.replace("adm_ban_", ""))
+        u = db.get_user(uid)
+        if u and u['is_banned']:
+            db.ban_user(uid, False)
+            await safe_edit(q, f"✅ کاربر <code>{uid}</code> آنبان شد!")
+            await safe_send(ctx.bot, uid, "✅ بن شما لغو شد!")
+        else:
+            db.ban_user(uid, True)
+            await safe_edit(q, f"🚫 کاربر <code>{uid}</code> بن شد!")
+            await safe_send(ctx.bot, uid, "🚫 شما از ربات بن شدید.")
+        return
+
+    # Mission approval
+    if data.startswith("miss_ok_"):
+        parts = data.replace("miss_ok_", "").split("_")
+        if len(parts) == 2:
+            uid, tid = int(parts[0]), int(parts[1])
+            db.approve_mission(uid, tid)
+            await safe_edit(q, f"✅ ماموریت کاربر <code>{uid}</code> تأیید شد!")
+            await safe_send(ctx.bot, uid, "✅ ماموریت شما تأیید شد! پاداش واریز شد.")
+        return
+
+    if data.startswith("miss_no_"):
+        parts = data.replace("miss_no_", "").split("_")
+        if len(parts) == 2:
+            uid, tid = int(parts[0]), int(parts[1])
+            db.reject_mission(uid, tid)
+            await safe_edit(q, f"❌ ماموریت کاربر <code>{uid}</code> رد شد!")
+            await safe_send(ctx.bot, uid, "❌ ماموریت شما رد شد.")
+        return
+
+    # Buy DP approval
+    if data.startswith("buydp_ok_"):
+        parts = data.replace("buydp_ok_", "").split("_")
+        if len(parts) == 2:
+            uid, dp = int(parts[0]), int(parts[1])
+            db.add_balance(uid, dp)
+            db.check_level_up(uid)
+            await safe_edit(q, f"✅ {fmt(dp)} DP به کاربر <code>{uid}</code> واریز شد!")
+            await safe_send(ctx.bot, uid,
+                f"✅ خرید DP تأیید شد!\n💰 +{fmt(dp)} DP واریز شد.\n💎 موجودی: {fmt(db.get_balance(uid))} DP")
+        return
+
+    if data.startswith("buydp_no_"):
+        uid = int(data.replace("buydp_no_", ""))
+        await safe_edit(q, f"❌ سفارش خرید DP کاربر <code>{uid}</code> رد شد!")
+        await safe_send(ctx.bot, uid, "❌ سفارش خرید DP شما رد شد.")
+        return# bot.py — Dark Point Bot (قسمت 10/12)
+
+# ══════════════════════════════════════════════
+#     ⚙️ ADMIN PANEL — PART 2
+# ══════════════════════════════════════════════
+
+# ──────────────── Force Join Management ────────────────
+async def _admin_force_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    channels = db.get_force_channels()
+    text = (
+        f"📢 <b>مدیریت فورس جوین</b>\n"
+        f"{'═' * 30}\n\n"
+    )
+    if channels:
+        for ch in channels:
+            text += f"📢 {html.escape(ch['channel_username'])} (<code>{ch['channel_id']}</code>)\n"
+    else:
+        text += "📭 کانالی تنظیم نشده.\n"
+
+    text += (
+        f"\n{'─' * 28}\n"
+        f"📝 برای افزودن: آیدی و یوزرنیم کانال را بفرستید.\n"
+        f"فرمت: <code>آیدی @یوزرنیم</code>\n"
+        f"مثال: <code>-1001234567890 @mychannel</code>\n\n"
+        f"🗑 برای حذف: <code>حذف آیدی</code>\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_force_add'] = True
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def process_admin_force_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
         return True
 
+    # Remove channel
+    if text.startswith('حذف '):
+        cid = text.replace('حذف ', '').strip()
+        db.remove_force_channel(cid)
+        await update.message.reply_text(
+            f"🗑 کانال <code>{cid}</code> حذف شد!",
+            parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+        clear_user_state(ctx)
+        return True
 
-async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Add channel
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "❌ فرمت: <code>آیدی @یوزرنیم</code>\n"
+            "مثال: <code>-1001234567890 @mychannel</code>",
+            parse_mode=ParseMode.HTML)
+        return True
+
+    cid = parts[0]
+    cuser = parts[1] if parts[1].startswith('@') else f"@{parts[1]}"
+
+    db.add_force_channel(cid, cuser)
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ کانال {cuser} (<code>{cid}</code>) اضافه شد!",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+async def process_admin_force_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Unused but kept for router compatibility"""
+    return False
+
+
+# ──────────────── Groups List ────────────────
+async def _admin_groups_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    groups = db.get_admin_groups()
+    text = (
+        f"📋 <b>گروه‌های ربات</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📊 تعداد: <b>{len(groups)}</b>\n\n"
+    )
+    for g in groups[:20]:
+        text += f"• {html.escape(g['title'] or '—')} (<code>{g['chat_id']}</code>)\n"
+
+    if len(groups) > 20:
+        text += f"\n... و {len(groups) - 20} گروه دیگر"
+    text += f"\n{'═' * 30}"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=admin_menu_kb())
+
+
+# ──────────────── Tasks Management ────────────────
+async def _admin_tasks_manage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tasks = db.get_active_tasks()
+    text = (
+        f"📋 <b>مدیریت تسک‌ها</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📊 تسک‌های فعال: <b>{len(tasks)}</b>\n\n"
+    )
+    for t in tasks[:10]:
+        cap = "∞" if t['capacity'] == -1 else f"{t['completed_count']}/{t['capacity']}"
+        text += (
+            f"🔹 {html.escape(t['title'])}\n"
+            f"   نوع: {t['type']} | پاداش: {fmt(t['reward'])} | ظرفیت: {cap}\n\n"
+        )
+
+    text += (
+        f"{'─' * 28}\n"
+        f"📝 برای افزودن تسک:\n"
+        f"فرمت: <code>نوع | عنوان | پاداش | داده | ظرفیت</code>\n"
+        f"انواع: channel, mission, simple\n"
+        f"مثال: <code>channel | عضویت کانال | 50000 | @mychannel | -1</code>\n\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_task_add'] = True
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def process_admin_task_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    parts = [p.strip() for p in text.split('|')]
+    if len(parts) < 4:
+        await update.message.reply_text(
+            "❌ فرمت: <code>نوع | عنوان | پاداش | داده | ظرفیت</code>",
+            parse_mode=ParseMode.HTML)
+        return True
+
+    ttype = parts[0]
+    title = parts[1]
+    try:
+        reward = int(parts[2])
+    except ValueError:
+        await update.message.reply_text("❌ پاداش باید عدد باشد!")
+        return True
+    data = parts[3]
+    cap = -1
+    if len(parts) >= 5:
+        try:
+            cap = int(parts[4])
+        except ValueError:
+            cap = -1
+
+    if ttype not in ('channel', 'mission', 'simple'):
+        await update.message.reply_text("❌ نوع باید channel, mission یا simple باشد!")
+        return True
+
+    tid = db.add_task(ttype, title, reward, data, cap)
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ تسک <b>{html.escape(title)}</b> اضافه شد! (ID: {tid})",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Missions Pending ────────────────
+async def _admin_missions_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    missions = db.get_pending_missions()
+    if not missions:
+        await update.message.reply_text(
+            "✅ ماموریت در انتظاری وجود ندارد.",
+            reply_markup=admin_menu_kb())
+        return
+
+    text = (
+        f"✅ <b>ماموریت‌های در انتظار</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📊 تعداد: <b>{len(missions)}</b>\n\n"
+    )
+    for m in missions[:10]:
+        text += (
+            f"👤 <code>{m['user_id']}</code> | "
+            f"📋 {html.escape(m['title'])} | "
+            f"💰 {fmt(m['reward'])} DP\n"
+        )
+
+    text += f"\n{'─' * 28}\n💡 برای تأیید/رد از دکمه‌های ارسال‌شده در چت استفاده کنید."
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    reply_markup=admin_menu_kb())
+
+
+# ──────────────── Shop Management ────────────────
+async def _admin_shop_manage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    items = db.get_shop_items()
+    text = (
+        f"🛒 <b>مدیریت فروشگاه</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📦 محصولات: <b>{len(items)}</b>\n\n"
+    )
+    for item in items:
+        stock = "∞" if item['stock'] == -1 else str(item['stock'])
+        text += (
+            f"📦 {html.escape(item['name'])}\n"
+            f"   💰 {fmt(item['price'])} DP | 📊 {stock} | نوع: {item['media_type']}\n\n"
+        )
+
+    text += (
+        f"{'─' * 28}\n"
+        f"📝 برای افزودن محصول:\n"
+        f"فرمت: <code>نام | قیمت | موجودی | نوع</code>\n"
+        f"انواع: text, photo, video, document\n"
+        f"مثال: <code>پلن ۵۰۰ گیگ | 1000000 | 10 | text</code>\n\n"
+        f"⚠️ پس از ارسال مشخصات، محتوای محصول را بفرستید.\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_shop_add'] = 'info'
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def process_admin_shop_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    step = ctx.user_data.get('admin_shop_add')
+    if not step:
+        return False
+
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    if step == 'info':
+        parts = [p.strip() for p in text.split('|')]
+        if len(parts) < 4:
+            await update.message.reply_text(
+                "❌ فرمت: <code>نام | قیمت | موجودی | نوع</code>",
+                parse_mode=ParseMode.HTML)
+            return True
+
+        name = parts[0]
+        try:
+            price = int(parts[1])
+            stock = int(parts[2])
+        except ValueError:
+            await update.message.reply_text("❌ قیمت و موجودی باید عدد باشند!")
+            return True
+        mtype = parts[3].lower()
+        if mtype not in ('text', 'photo', 'video', 'document'):
+            mtype = 'text'
+
+        ctx.user_data['admin_shop_add'] = 'content'
+        ctx.user_data['shop_name'] = name
+        ctx.user_data['shop_price'] = price
+        ctx.user_data['shop_stock'] = stock
+        ctx.user_data['shop_type'] = mtype
+
+        if mtype == 'text':
+            await update.message.reply_text("📝 محتوای متنی محصول را وارد کنید:")
+        else:
+            await update.message.reply_text(f"📎 فایل {mtype} محصول را ارسال کنید:")
+        return True
+
+    elif step == 'content':
+        name = ctx.user_data.get('shop_name', '')
+        price = ctx.user_data.get('shop_price', 0)
+        stock = ctx.user_data.get('shop_stock', -1)
+        mtype = ctx.user_data.get('shop_type', 'text')
+
+        if mtype == 'text':
+            content = text
+        elif update.message.photo:
+            content = update.message.photo[-1].file_id
+            mtype = 'photo'
+        elif update.message.video:
+            content = update.message.video.file_id
+            mtype = 'video'
+        elif update.message.document:
+            content = update.message.document.file_id
+            mtype = 'document'
+        else:
+            content = text
+            mtype = 'text'
+
+        iid = db.add_shop_item(name, price, stock, mtype, content)
+        clear_user_state(ctx)
+        await update.message.reply_text(
+            f"✅ محصول <b>{html.escape(name)}</b> اضافه شد! (ID: {iid})",
+            parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+        return True
+
+    return False
+
+
+# ──────────────── Gift Management ────────────────
+async def _admin_gift_manage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    plans = db.get_gift_plans()
+    teddy_price = db.get_setting('gift_price', '100000')
+
+    text = (
+        f"🎁 <b>مدیریت هدایا</b>\n"
+        f"{'═' * 30}\n\n"
+        f"🧸 قیمت خرس تدی: <b>{fmt(int(teddy_price))}</b> DP\n"
+        f"📦 پلن‌های هدیه: <b>{len(plans)}</b>\n\n"
+    )
+    for p in plans:
+        text += f"🎁 {html.escape(p['name'])} — {fmt(p['price'])} DP\n"
+
+    text += (
+        f"\n{'─' * 28}\n"
+        f"📝 افزودن پلن: <code>نام | قیمت</code>\n"
+        f"🧸 تغییر قیمت تدی: <code>تدی قیمت</code>\n"
+        f"مثال: <code>هدیه ویژه | 500000</code>\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_gift_add'] = True
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def process_admin_gift_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    # Change teddy price
+    if text.startswith('تدی '):
+        try:
+            price = int(text.replace('تدی ', '').strip())
+            db.set_setting('gift_price', str(price))
+            clear_user_state(ctx)
+            await update.message.reply_text(
+                f"✅ قیمت خرس تدی: <b>{fmt(price)}</b> DP",
+                parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+            return True
+        except ValueError:
+            await update.message.reply_text("❌ قیمت نامعتبر!")
+            return True
+
+    # Add plan
+    parts = [p.strip() for p in text.split('|')]
+    if len(parts) < 2:
+        await update.message.reply_text("❌ فرمت: <code>نام | قیمت</code>",
+                                        parse_mode=ParseMode.HTML)
+        return True
+
+    name = parts[0]
+    try:
+        price = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ قیمت نامعتبر!")
+        return True
+
+    db.add_gift_plan(name, price)
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ پلن هدیه <b>{html.escape(name)}</b> اضافه شد!",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Buy DP Settings ────────────────
+async def _admin_buydp_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    dp_amount = db.get_setting('buy_dp_amount', str(config.BUY_DP_DEFAULT_AMOUNT))
+    price = db.get_setting('buy_dp_price', str(config.BUY_DP_DEFAULT_PRICE))
+
+    text = (
+        f"💰 <b>تنظیم خرید DP</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📦 مقدار DP: <b>{fmt(int(dp_amount))}</b>\n"
+        f"💵 قیمت (تومان): <b>{fmt(int(price))}</b>\n\n"
+        f"{'─' * 28}\n"
+        f"📝 تغییر: <code>مقدار قیمت</code>\n"
+        f"مثال: <code>1000000 100000</code>\n"
+        f"(1,000,000 DP = 100,000 تومان)\n\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_buydp_set'] = True
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def process_admin_buydp_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ فرمت: <code>مقدار قیمت</code>",
+                                        parse_mode=ParseMode.HTML)
+        return True
+
+    try:
+        dp_amount = int(parts[0])
+        price = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ اعداد نامعتبر!")
+        return True
+
+    db.set_setting('buy_dp_amount', str(dp_amount))
+    db.set_setting('buy_dp_price', str(price))
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ تنظیمات خرید DP:\n"
+        f"📦 <b>{fmt(dp_amount)}</b> DP = <b>{fmt(price)}</b> تومان",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Stars Settings ────────────────
+async def _admin_stars_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    stars_price = db.get_setting('stars_price', str(config.STARS_DP_COST))
+
+    text = (
+        f"⭐ <b>تنظیم استارز</b>\n"
+        f"{'═' * 30}\n\n"
+        f"📊 نرخ فعلی: <b>{fmt(int(stars_price))}</b> DP = 50 ⭐\n\n"
+        f"📝 تغییر: <code>قیمت جدید</code>\n"
+        f"مثال: <code>2000000</code>\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_stars_set'] = True
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    # Inline handler for this
+    async def _process(update2, ctx2):
+        t = (update2.message.text or "").strip()
+        if t in ('لغو', 'cancel'):
+            clear_user_state(ctx2)
+            await update2.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+            return
+        try:
+            p = int(t)
+            db.set_setting('stars_price', str(p))
+            clear_user_state(ctx2)
+            await update2.message.reply_text(
+                f"✅ نرخ استارز: <b>{fmt(p)}</b> DP = 50 ⭐",
+                parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+        except ValueError:
+            await update2.message.reply_text("❌ عدد نامعتبر!")
+
+    # Store for router
+    ctx.user_data['admin_stars_set'] = True
+
+
+# ──────────────── Panel Plans ────────────────
+async def _admin_panel_plans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    plans = db.get_panel_plans()
+    text = (
+        f"📦 <b>پلن‌های پنل</b>\n"
+        f"{'═' * 30}\n\n"
+    )
+    if plans:
+        for p in plans:
+            text += f"📦 {html.escape(p['name'])} — {fmt(p['price'])} DP\n"
+    else:
+        text += "📭 پلنی فعال نیست.\n"
+
+    text += (
+        f"\n{'─' * 28}\n"
+        f"📝 افزودن: <code>نام | قیمت</code>\n"
+        f"مثال: <code>پنل 500 گیگ | 5000000</code>\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_panel_plan'] = True
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def process_admin_panel_plan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    parts = [p.strip() for p in text.split('|')]
+    if len(parts) < 2:
+        await update.message.reply_text("❌ فرمت: <code>نام | قیمت</code>",
+                                        parse_mode=ParseMode.HTML)
+        return True
+
+    name = parts[0]
+    try:
+        price = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ قیمت نامعتبر!")
+        return True
+
+    db.add_panel_plan(name, price)
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ پلن <b>{html.escape(name)}</b> اضافه شد!",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Referral Settings ────────────────
+async def _admin_referral_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ref_reward = db.get_setting('referral_reward', str(config.DEFAULT_REFERRAL_REWARD))
+    first_reward = db.get_setting('first_join_reward', str(config.DEFAULT_FIRST_JOIN_REWARD))
+
+    text = (
+        f"🏷 <b>تنظیم پاداش رفرال</b>\n"
+        f"{'═' * 30}\n\n"
+        f"💵 پاداش هر رفرال: <b>{fmt(int(ref_reward))}</b> DP\n"
+        f"🎁 پاداش ورود جدید: <b>{fmt(int(first_reward))}</b> DP\n\n"
+        f"{'─' * 28}\n"
+        f"📝 تغییر: <code>رفرال ورود</code>\n"
+        f"مثال: <code>100000 50000</code>\n"
+        f"❌ برای لغو: <code>لغو</code>"
+    )
+
+    ctx.user_data['admin_ref_set'] = True
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def process_admin_ref_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handled via admin_text_router stars_set fallback"""
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ فرمت: <code>رفرال ورود</code>",
+                                        parse_mode=ParseMode.HTML)
+        return True
+
+    try:
+        ref = int(parts[0])
+        first = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ اعداد نامعتبر!")
+        return True
+
+    db.set_setting('referral_reward', str(ref))
+    db.set_setting('first_join_reward', str(first))
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ پاداش رفرال: <b>{fmt(ref)}</b> DP\n"
+        f"✅ پاداش ورود: <b>{fmt(first)}</b> DP",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Gift to Top N ────────────────
+async def _admin_gift_top_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_gift_top'] = True
+    await update.message.reply_text(
+        "🎁 <b>هدیه به برترین‌ها</b>\n\n"
+        "📝 فرمت: <code>تعداد مبلغ</code>\n"
+        "مثال: <code>10 1000000</code>\n"
+        "(به ۱۰ نفر اول، هر کدام ۱M DP)\n\n"
+        "❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_gift_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ فرمت: <code>تعداد مبلغ</code>",
+                                        parse_mode=ParseMode.HTML)
+        return True
+
+    try:
+        n = int(parts[0])
+        amount = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ اعداد نامعتبر!")
+        return True
+
+    top = db.get_top_users(n)
+    sent = 0
+    for u in top:
+        db.add_balance(u['user_id'], amount)
+        db.check_level_up(u['user_id'])
+        await safe_send(ctx.bot, u['user_id'],
+            f"🎁 <b>هدیه ادمین!</b>\n\n"
+            f"💰 +<b>{fmt(amount)}</b> DP\n"
+            f"🏆 به خاطر رتبه برتر شما!\n"
+            f"💎 موجودی: <b>{fmt(db.get_balance(u['user_id']))}</b> DP")
+        sent += 1
+        await asyncio.sleep(0.05)
+
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ هدیه به <b>{sent}</b> نفر برتر ارسال شد!\n"
+        f"💰 هر نفر: <b>{fmt(amount)}</b> DP",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True
+
+
+# ──────────────── Gift to All ────────────────
+async def _admin_gift_all_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['admin_gift_all'] = True
+    user_count = db.get_user_count()
+    await update.message.reply_text(
+        f"🎁 <b>هدیه به همه</b>\n\n"
+        f"👥 تعداد کاربران: <b>{fmt(user_count)}</b>\n\n"
+        f"📝 مبلغ هدیه برای هر نفر را وارد کنید:\n"
+        f"مثال: <code>50000</code>\n\n"
+        f"⚠️ این عملیات ممکن است طول بکشد!\n"
+        f"❌ برای لغو: <code>لغو</code>",
+        parse_mode=ParseMode.HTML)
+
+
+async def process_admin_gift_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in ('لغو', 'cancel'):
+        clear_user_state(ctx)
+        await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+        return True
+
+    try:
+        amount = int(text)
+    except ValueError:
+        await update.message.reply_text("❌ مبلغ نامعتبر!")
+        return True
+
+    users = db.get_all_users()
+    await update.message.reply_text(f"⏳ در حال ارسال هدیه به {len(users)} کاربر...")
+
+    sent = 0
+    for uid in users:
+        db.add_balance(uid, amount)
+        db.check_level_up(uid)
+        await safe_send(ctx.bot, uid,
+            f"🎁 <b>هدیه همگانی!</b>\n\n"
+            f"💰 +<b>{fmt(amount)}</b> DP\n"
+            f"💎 موجودی: <b>{fmt(db.get_balance(uid))}</b> DP")
+        sent += 1
+        if sent % 50 == 0:
+            await asyncio.sleep(1)  # Rate limit
+        else:
+            await asyncio.sleep(0.03)
+
+    clear_user_state(ctx)
+    await update.message.reply_text(
+        f"✅ هدیه به <b>{sent}</b> کاربر ارسال شد!\n"
+        f"💰 هر نفر: <b>{fmt(amount)}</b> DP\n"
+        f"💸 کل: <b>{fmt(sent * amount)}</b> DP",
+        parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+    return True# bot.py — Dark Point Bot (قسمت 11/12)
+
+# ══════════════════════════════════════════════
+#     📨 MAIN USER TEXT ROUTER
+# ══════════════════════════════════════════════
+# Routes all private text messages to the right handler
+
+async def user_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Main router for all private text messages"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    uid = update.effective_user.id
+    text = (update.message.text or "").strip()
+
+    # ── Admin check first ──
+    if is_admin(uid):
+        # Check if admin is in restore flow
+        if ctx.user_data.get('admin_restore') and update.message.document:
+            await process_admin_restore(update, ctx)
+            return
+        # Check admin stars_set flow
+        if ctx.user_data.get('admin_stars_set'):
+            if text in ('لغو', 'cancel'):
+                clear_user_state(ctx)
+                await update.message.reply_text("❌ لغو شد.", reply_markup=admin_menu_kb())
+                return
+            try:
+                p = int(text)
+                db.set_setting('stars_price', str(p))
+                clear_user_state(ctx)
+                await update.message.reply_text(
+                    f"✅ نرخ استارز: <b>{fmt(p)}</b> DP = 50 ⭐",
+                    parse_mode=ParseMode.HTML, reply_markup=admin_menu_kb())
+            except ValueError:
+                await update.message.reply_text("❌ عدد نامعتبر!")
+            return
+        # Check admin ref_set flow
+        if ctx.user_data.get('admin_ref_set'):
+            await process_admin_ref_set(update, ctx)
+            return
+        # Route to admin handler
+        await admin_text_router(update, ctx)
+        # If admin handler didn't match a flow, check user flows below too
+        # (admin might be using user features)
+
+    # ── Bot off check ──
+    if not db.is_bot_on() and not is_admin(uid):
+        await update.message.reply_text(bot_off_text())
+        return
+
+    # ── Ban check ──
+    if db.is_banned(uid):
+        await update.message.reply_text("🚫 شما از ربات بن شده‌اید.")
+        return
+
+    # ── Process active input flows (in priority order) ──
+
+    # TON Withdrawal flow
+    if ctx.user_data.get('tw_step') == 'amount':
+        if await process_tw_amount(update, ctx):
+            return
+    if ctx.user_data.get('tw_step') == 'wallet':
+        if await process_tw_wallet(update, ctx):
+            return
+
+    # Bank deposit flow
+    if ctx.user_data.get('bank_action') == 'deposit':
+        if await process_bank_input(update, ctx):
+            return
+
+    # Gift flow
+    if ctx.user_data.get('gift_type'):
+        if await process_gift_input(update, ctx):
+            return
+
+    # Mission screenshot flow
+    if ctx.user_data.get('mission_task'):
+        if await process_mission_photo(update, ctx):
+            return
+
+    # Currency convert flow
+    if ctx.user_data.get('conv_type'):
+        if await process_convert_input(update, ctx):
+            return
+
+    # Buy DP receipt flow
+    if ctx.user_data.get('buydp_active'):
+        if await process_buydp_receipt(update, ctx):
+            return
+
+    # ── Menu button matching ──
+    await _user_menu_button(update, ctx, text)
+
+
+async def _user_menu_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
+    """Match user menu button text to handlers"""
+
+    # Exact match for main menu buttons
+    if text in ("💎 برداشت TON 💎", "💎 برداشت TON"):
+        await msg_ton_withdraw(update, ctx)
+    elif text == "🎁 دریافت جایزه":
+        await msg_claim(update, ctx)
+    elif text == "👤 پروفایل دارکی":
+        await msg_profile(update, ctx)
+    elif text == "🎮 بازی‌ها":
+        await msg_games(update, ctx)
+    elif text == "⛏ ماینر دارکی":
+        await msg_miner(update, ctx)
+    elif text == "🏦 بانک دارکی":
+        await msg_bank(update, ctx)
+    elif text == "🏭 کارخونه دارکی":
+        await msg_factory(update, ctx)
+    elif text == "🛒 فروشگاه":
+        await msg_shop(update, ctx)
+    elif text == "🎰 گردونه شانس":
+        await msg_wheel(update, ctx)
+    elif text == "💰 خرید DP":
+        await msg_buy_dp(update, ctx)
+    elif text == "⭐ برداشت استارز":
+        await msg_stars(update, ctx)
+    elif text == "📋 تسک‌ها":
+        await msg_tasks(update, ctx)
+    elif text == "👍 چالش لایک":
+        await msg_like(update, ctx)
+    elif text == "💱 تبدیل ارز":
+        await msg_convert(update, ctx)
+    elif text == "🎁 هدیه":
+        await msg_gift(update, ctx)
+    elif text == "📊 لیدربورد":
+        await msg_leaderboard(update, ctx)
+    elif text == "👥 زیرمجموعه‌گیری":
+        await msg_referral(update, ctx)
+    elif text == "📖 پنل DP":
+        await msg_dp_panel(update, ctx)
+    elif text == "➕ افزودن به گروه":
+        await msg_add_group(update, ctx)
+    elif text == "📖 راهنما":
+        await cmd_help(update, ctx)
+    elif text in ("🔙 بازگشت به منو", "🔙 بازگشت"):
+        await msg_back_to_main(update, ctx)
+    elif text == "⚙️ پنل مدیریت" or text == "/admin":
+        await cmd_admin(update, ctx)
+    else:
+        # Unrecognized text — show help
+        await update.message.reply_text(
+            "❓ متوجه نشدم!\n\n"
+            "لطفاً از دکمه‌های منو استفاده کنید 👇",
+            reply_markup=main_menu_kb())
+
+
+# ══════════════════════════════════════════════
+#     🔘 MAIN CALLBACK ROUTER
+# ══════════════════════════════════════════════
+
+async def main_callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Route all callback queries to appropriate handlers"""
+    q = update.callback_query
+    if not q or not q.data:
+        return
+
+    data = q.data
+    uid = q.from_user.id
+
+    # ── Force Join ──
+    if data == "check_join":
+        await cb_check_join(update, ctx)
+        return
+
+    # ── TON Withdrawal ──
+    if data.startswith("tw_"):
+        if data == "tw_start":
+            await cb_tw_start(update, ctx)
+        elif data == "tw_locked":
+            await cb_tw_locked(update, ctx)
+        elif data == "tw_cancel":
+            await cb_tw_cancel(update, ctx)
+        elif data == "tw_confirm":
+            await cb_tw_confirm(update, ctx)
+        elif data == "tw_history":
+            await cb_tw_history(update, ctx)
+        elif data == "tw_back":
+            await cb_tw_back(update, ctx)
+        return
+
+    # ── TON Admin ──
+    if data.startswith("twadm_"):
+        if data.startswith("twadm_ok_"):
+            await cb_tw_admin_approve(update, ctx)
+        elif data.startswith("twadm_no_"):
+            await cb_tw_admin_reject(update, ctx)
+        elif data == "twadm_list":
+            await cb_tw_admin_list(update, ctx)
+        return
+
+    # ── Bank ──
+    if data.startswith("bank_") or data.startswith("bw_"):
+        if data == "bank_deposit":
+            await cb_bank_deposit(update, ctx)
+        elif data == "bank_withdraw":
+            await cb_bank_withdraw(update, ctx)
+        elif data == "bank_cancel":
+            await cb_bank_cancel(update, ctx)
+        elif data == "bank_back":
+            await cb_bank_back(update, ctx)
+        elif data.startswith("bw_"):
+            await cb_bank_withdraw_confirm(update, ctx)
+        return
+
+    # ── Miner ──
+    if data.startswith("miner_"):
+        if data == "miner_buy":
+            await cb_miner_buy(update, ctx)
+        elif data == "miner_elec":
+            await cb_miner_elec(update, ctx)
+        elif data == "miner_upgrade":
+            await cb_miner_upgrade(update, ctx)
+        elif data == "miner_collect":
+            await cb_miner_collect(update, ctx)
+        elif data == "miner_switch":
+            await cb_miner_switch(update, ctx)
+        return
+
+    # ── Factory ──
+    if data.startswith("factory_"):
+        if data == "factory_build":
+            await cb_factory_build(update, ctx)
+        elif data == "factory_collect":
+            await cb_factory_collect(update, ctx)
+        elif data == "factory_upgrade":
+            await cb_factory_upgrade(update, ctx)
+        return
+
+    # ── Games ──
+    if data.startswith("g_") or data == "games_back":
+        if data == "games_back":
+            await cb_games_back(update, ctx)
+        else:
+            await cb_game_info(update, ctx)
+        return
+
+    if data.startswith("guess_"):
+        await cb_guess(update, ctx)
+        return
+
+    if data.startswith("bomb_") or data == "bomb_cash":
+        await cb_bomb(update, ctx)
+        return
+
+    # ── Shop ──
+    if data.startswith("shop_"):
+        if data.startswith("shop_buy_"):
+            await cb_shop_buy(update, ctx)
+        elif data == "shop_back":
+            await cb_shop_back(update, ctx)
+        return
+
+    # ── Gift ──
+    if data.startswith("gift_"):
+        if data == "gift_teddy":
+            await cb_gift_teddy(update, ctx)
+        elif data.startswith("gift_buy_"):
+            await cb_gift_buy(update, ctx)
+        return
+
+    # ── Tasks ──
+    if data.startswith("task_"):
+        if data.startswith("task_do_"):
+            await cb_task_do(update, ctx)
+        elif data.startswith("task_check_"):
+            await cb_task_check(update, ctx)
+        return
+
+    # ── Like ──
+    if data.startswith("like_"):
+        if data == "like_join":
+            await cb_like_join(update, ctx)
+        elif data == "like_status":
+            await q.answer("📊 وضعیت چالش شما فعال است!")
+        return
+
+    # ── Wheel ──
+    if data.startswith("wheel_"):
+        await cb_wheel(update, ctx)
+        return
+
+    # ── Convert ──
+    if data.startswith("conv_"):
+        if data in ("conv_ton", "conv_usdt"):
+            await cb_convert(update, ctx)
+        elif data == "conv_cancel":
+            await cb_conv_cancel(update, ctx)
+        return
+
+    # ── Stars ──
+    if data.startswith("stars_"):
+        await cb_stars(update, ctx)
+        return
+
+    # ── Buy DP ──
+    if data.startswith("buydp_"):
+        if data == "buydp_order":
+            await cb_buydp_order(update, ctx)
+        elif data.startswith("buydp_ok_") or data.startswith("buydp_no_"):
+            await cb_admin_actions(update, ctx)
+        return
+
+    # ── DP Panel ──
+    if data.startswith("panel_"):
+        await cb_dp_panel(update, ctx)
+        return
+
+    # ── Admin Section Toggle & Actions ──
+    if data.startswith("toggle_sec_") or data == "admin_back":
+        await cb_admin_actions(update, ctx)
+        return
+
+    if data.startswith("adm_"):
+        await cb_admin_actions(update, ctx)
+        return
+
+    # ── Mission Approval ──
+    if data.startswith("miss_"):
+        await cb_admin_actions(update, ctx)
+        return
+
+    # ── Back to main ──
+    if data == "back_main":
+        clear_user_state(ctx)
+        await q.answer()
+        await ctx.bot.send_message(uid, "منوی اصلی:", reply_markup=main_menu_kb())
+        return
+
+    # ── Fallback ──
+    await q.answer()
+
+
+# ══════════════════════════════════════════════
+#     📸 MEDIA HANDLERS (Photos/Documents)
+# ══════════════════════════════════════════════
+
+async def user_photo_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages from users (missions, buy DP receipts)"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    uid = update.effective_user.id
+
+    # Mission screenshot
+    if ctx.user_data.get('mission_task'):
+        await process_mission_photo(update, ctx)
+        return
+
+    # Buy DP receipt
+    if ctx.user_data.get('buydp_active'):
+        await process_buydp_receipt(update, ctx)
+        return
+
+    # Admin restore
+    if is_admin(uid) and ctx.user_data.get('admin_restore'):
+        await process_admin_restore(update, ctx)
+        return
+
+    # Admin broadcast (photo)
+    if is_admin(uid) and ctx.user_data.get('admin_broadcast'):
+        await process_admin_broadcast(update, ctx)
+        return
+
+    if is_admin(uid) and ctx.user_data.get('admin_broadcast_group'):
+        await process_admin_broadcast_group(update, ctx)
+        return
+
+    # Admin shop content
+    if is_admin(uid) and ctx.user_data.get('admin_shop_add') == 'content':
+        await process_admin_shop_add(update, ctx)
+        return
+
+
+async def user_document_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle document messages"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    uid = update.effective_user.id
+
+    # Admin restore
+    if is_admin(uid) and ctx.user_data.get('admin_restore'):
+        await process_admin_restore(update, ctx)
+        return
+
+    # Admin broadcast (document)
+    if is_admin(uid) and ctx.user_data.get('admin_broadcast'):
+        await process_admin_broadcast(update, ctx)
+        return
+
+    if is_admin(uid) and ctx.user_data.get('admin_broadcast_group'):
+        await process_admin_broadcast_group(update, ctx)
+        return
+
+    # Admin shop content
+    if is_admin(uid) and ctx.user_data.get('admin_shop_add') == 'content':
+        await process_admin_shop_add(update, ctx)
+        return
+
+
+# ══════════════════════════════════════════════
+#     📦 CONFIG SEND TO PANEL BUYER
+# ══════════════════════════════════════════════
+
+async def cmd_send_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin sends config to a panel buyer"""
+    if not is_admin(update.effective_user.id):
+        return
+
+    parts = (update.message.text or "").strip().split()
+    if len(parts) < 3:
+        await update.message.reply_text(
+            "📦 <b>ارسال کانفیگ</b>\n\n"
+            "📝 فرمت: <code>/sendconfig آیدی متن_کانفیگ</code>\n"
+            "مثال: <code>/sendconfig 123456 vmess://...</code>",
+            parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("❌ آیدی نامعتبر!")
+        return
+
+    config_text = " ".join(parts[2:])
+
+    await safe_send(ctx.bot, target_id,
+        f"📦 <b>کانفیگ پنل شما</b>\n\n"
+        f"<code>{html.escape(config_text)}</code>\n\n"
+        f"💡 {config.PANEL_PURCHASE_MESSAGE}")
+
+    await update.message.reply_text(
+        f"✅ کانفیگ به <code>{target_id}</code> ارسال شد!",
+        parse_mode=ParseMode.HTML)
+
+
+# ══════════════════════════════════════════════
+#     🎯 GAME TIMEOUT CLEANUP JOB
+# ══════════════════════════════════════════════
+
+async def cleanup_game_timeouts(ctx: ContextTypes.DEFAULT_TYPE):
+    """Periodic cleanup of expired game states (runs every 5 min)"""
+    # This is a best-effort cleanup; individual game callbacks
+    # also check timeouts. This handles edge cases.
+    logger.debug("Game timeout cleanup tick")
+
+
+# ══════════════════════════════════════════════
+#     🏠 GROUP MEMBER COUNT CHECK (on join)
+# ══════════════════════════════════════════════
+
+async def on_new_chat_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Check if bot was added to a group and verify member count"""
+    if not update.message or not update.message.new_chat_members:
+        return
+
+    for member in update.message.new_chat_members:
+        if member.id == ctx.bot.id:
+            chat = update.effective_chat
+            try:
+                count = await ctx.bot.get_chat_member_count(chat.id)
+                if count < config.MIN_GROUP_MEMBERS:
+                    await update.message.reply_text(
+                        f"⚠️ تعداد اعضا ({count}) کمتر از {config.MIN_GROUP_MEMBERS} است.\n"
+                        f"ربات گروه را ترک می‌کند.")
+                    await ctx.bot.leave_chat(chat.id)
+                else:
+                    db.add_admin_group(chat.id, chat.title or "گروه")
+                    await update.message.reply_text(
+                        f"🌑 <b>Dark Point Bot</b> فعال شد!\n\n"
+                        f"📝 دستور <code>دارک</code> را بفرستید.",
+                        parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.error(f"New group check err: {e}")# bot.py — Dark Point Bot (قسمت 12/12 — FINAL)
+
+# ══════════════════════════════════════════════
+#     🏗️ GROUP TEXT COMMAND HANDLER
+# ══════════════════════════════════════════════
+
+async def group_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle Persian text commands in groups"""
+    if update.effective_chat.type == ChatType.PRIVATE:
+        return
     if not update.message or not update.message.text:
         return
 
     text = update.message.text.strip()
-    user = update.effective_user
-    chat = update.effective_chat
+    uid = update.effective_user.id
 
-    if chat.type not in ['group', 'supergroup']:
-        return
-
-    if db.is_banned(user.id):
-        return
-
-    if not is_bot_active() and not is_admin(user.id):
-        return
-
-    # دستور ایدی عددی - فقط ادمین با ریپلای
-    if text == 'ایدی عددی' and is_admin(user.id) and update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user
-        target_name = html.escape(target_user.first_name or "کاربر")
-        await update.message.reply_text(
-            f"👤 <b>اطلاعات کاربر</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 نام: <b>{target_name}</b>\n"
-            f"🆔 شناسه عددی: <code>{target_user.id}</code>\n"
-            f"📛 یوزرنیم: @{target_user.username or 'ندارد'}",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    # چک ریپلای بازی‌ها
-    if update.message.reply_to_message:
-        handled = await handle_group_reply_for_games(update, context)
-        if handled:
-            return
-
-    # دستورات گروه که نیاز به چک شرایط دارن
-    game_commands = ['دارک', 'دارک کانفیگ', 'موجودی', 'پروفایل دارکی', 'لیدربورد',
-                     'بانک دارکی', 'کارخونه دارکی', 'حدس بزن', 'کازینو', 'بمب',
-                     'فوتبال', 'انفجار', 'ماینر دارکی']
-    game_prefixes = ['بازی', 'انفجار', 'تاس', 'انتقال ']
-
-    is_game_cmd = False
-    for cmd in game_commands:
-        if text == cmd or text.startswith(cmd + ' '):
-            is_game_cmd = True
-            break
-    if not is_game_cmd:
-        for prefix in game_prefixes:
-            if text.startswith(prefix):
-                is_game_cmd = True
-                break
-
-    if is_game_cmd:
-        if not await check_group_requirements(update, context):
-            return
-
-    if not db.get_user(user.id):
-        db.create_user(user.id, user.username or "", user.first_name or "")
-
-    db.update_last_active(user.id)
-
-    u = db.get_user(user.id)
-    if u and u['factory_active']:
-        db.factory_maintenance_due(user.id)
-
-    # بروزرسانی ماین
-    miner = db.get_miner(user.id)
-    if miner and miner['is_mining']:
-        db.update_mining_balance(user.id)
-
-    # تشخیص دستور
-    if text in ['دارک', 'دارک کانفیگ']:
-        await handle_dark_claim(update, context)
-    elif text == 'موجودی':
-        await handle_balance_check(update, context)
-    elif text == 'پروفایل دارکی':
-        await handle_dark_profile(update, context)
-    elif text.startswith('بازی'):
-        parts = text.split()
-        if len(parts) >= 2:
-            try:
-                amount = int(parts[1])
-                await handle_create_game(update, context, amount)
-            except ValueError:
-                pass
-    elif text.startswith('انفجار'):
-        parts = text.split()
-        if len(parts) >= 2:
-            try:
-                amount = int(parts[1])
-                await handle_crash_game_group(update, context, amount)
-            except ValueError:
-                pass
-    elif text.startswith('تاس'):
-        parts = text.split()
-        if len(parts) >= 2:
-            try:
-                amount = int(parts[1])
-                await handle_dice_game_group(update, context, amount)
-            except ValueError:
-                pass
-    elif text == 'حدس بزن' or text.startswith('حدس بزن'):
-        await handle_guess_game_start(update, context)
-    elif text == 'کازینو' or text.startswith('کازینو'):
-        await handle_casino_start(update, context)
-    elif text == 'بمب' or text.startswith('بمب'):
-        await handle_bomb_start(update, context)
-    elif text == 'فوتبال' or text.startswith('فوتبال'):
-        await handle_football_start(update, context)
-    elif text == 'ماینر دارکی':
-        await handle_miner_start(update, context)
-    elif text.startswith('انتقال '):
-        await handle_transfer(update, context)
-    elif text == 'بانک دارکی':
-        await handle_bank(update, context)
-    elif text == 'کارخونه دارکی':
-        await handle_factory(update, context)
-    elif text == 'لیدربورد':
-        await handle_leaderboard_group(update, context)
-
-
-async def handle_dark_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = db.get_user(user.id)
-    if not u:
-        db.create_user(user.id, user.username or "", user.first_name or "")
-        u = db.get_user(user.id)
-
-    remaining = db.get_cooldown_remaining(user.id)
-    if remaining > 0:
-        mins = int(remaining // 60)
-        secs = int(remaining % 60)
-        await update.message.reply_text(
-            f"⏳ <b>صبر کنید!</b>\n⏰ <b>{mins}</b>m <b>{secs}</b>s تا دریافت بعدی",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    level = u['level']
-    min_dp, max_dp = get_dp_range(level)
-    earned = random.randint(min_dp, max_dp)
-    cooldown = get_random_cooldown()
-
-    db.add_dark_points(user.id, earned)
-    db.set_claim(user.id, cooldown)
-    new_level, reward = db.check_and_update_level(user.id)
-    safe_name = html.escape(user.first_name or "کاربر")
-
-    cd_mins = cooldown // 60
-    cd_secs = cooldown % 60
-
-    text = (
-        f"✨ 🏴 <b>دارک پوینت دریافت شد!</b> 🏴 ✨\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 کاربر: <b>{safe_name}</b>\n"
-        f"💎 دریافتی: +<code>{format_number(earned)}</code> DP\n"
-        f"📊 سطح: {level} | {get_level_title(level)}\n"
-        f"💰 موجودی: <code>{format_number(db.get_balance(user.id))}</code>\n\n"
-        f"⏰ دریافت بعدی: {cd_mins}m {cd_secs}s"
-    )
-
-    if new_level:
-        text += f"\n\n🎊 <b>ارتقا به سطح {new_level}!</b>\n🎁 +<code>{format_number(reward)}</code> DP"
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    kb = [[InlineKeyboardButton("🏴 ورود به ربات", url=f"https://t.me/{BOT_USERNAME}")]]
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def handle_balance_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    balance = db.get_balance(user.id)
-    level = db.get_level(user.id)
-    safe_name = html.escape(user.first_name or "کاربر")
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    kb = [
-        [InlineKeyboardButton(f"💎 موجودی من: {format_number(balance)} DP 💎", callback_data=f"show_my_balance_{user.id}")],
-        [InlineKeyboardButton("🏴 ورود به ربات", url=f"https://t.me/{BOT_USERNAME}")]
-    ]
-
-    await update.message.reply_text(
-        f"💎 ✨ <b>موجودی دارک پوینت</b> ✨ 💎\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 <b>{safe_name}</b>\n"
-        f"🆔 <code>{user.id}</code>\n\n"
-        f"💰 موجودی: <code>{format_number(balance)}</code> DP\n"
-        f"📊 سطح: {level} | {get_level_title(level)}",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-
-async def show_my_balance_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = int(query.data.split("_")[-1])
-    if query.from_user.id != user_id:
-        await query.answer("❌ این دکمه برای شما نیست!", show_alert=True)
-        return
-    balance = db.get_balance(user_id)
-    level = db.get_level(user_id)
-    await query.answer(
-        f"💎 موجودی: {format_number(balance)} DP\n📊 سطح: {level} ({get_level_title(level)})",
-        show_alert=True
-    )
-
-
-async def handle_dark_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = db.get_user(user.id)
-    if not u:
-        return
-
-    level = u['level']
-    balance = u['dark_points']
-    total = u['total_earned']
-    refs = u['referral_count']
-    title = get_level_title(level)
-    next_req = get_next_level_requirement(level)
-    needed = max(0, (next_req or 0) - total) if next_req else 0
-    safe_name = html.escape(user.first_name or "کاربر")
-
-    factory_info = ""
-    if u['factory_active']:
-        f_level = u['factory_level']
-        mine_rate = FACTORY_LEVELS[f_level]['mine_per_min']
-        factory_info = f"🏭 کارخونه: سطح {f_level} ({mine_rate} DP/دقیقه) ✅\n"
-    elif u['factory_level'] > 0:
-        factory_info = f"🏭 کارخونه: غیرفعال (سطح {u['factory_level']})\n"
-
-    bank_info = ""
-    if u['bank_account']:
-        bank_info = f"🏦 بانک: <code>{format_number(u['bank_balance'])}</code>\n"
-
-    # اطلاعات ماینر
-    miner = db.get_miner(user.id)
-    miner_info = ""
-    if miner and miner['miner_level'] > 0:
-        status = "✅" if miner['is_mining'] else "⚫"
-        miner_info = f"⚒ ماینر: سطح {miner['miner_level']} {status}\n"
-        miner_info += f"🪙 TON: <code>{format_crypto(miner['ton_balance'], 4)}</code>\n"
-        miner_info += f"💵 USDT: <code>{format_crypto(miner['usdt_balance'], 4)}</code>\n"
-
-    stars_price = int(db.get_setting('stars_price', '1000000'))
-    stars_can = balance // stars_price
-    if stars_can > 0:
-        stars_text = f"⭐ قابل برداشت: {stars_can * 50} استارز\n"
-    else:
-        stars_text = f"⭐ تا استارز: <code>{format_number(stars_price - balance)}</code>\n"
-
-    text = (
-        f"🏴 ✨ <b>پروفایل دارکی</b> ✨ 🏴\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 نام: <b>{safe_name}</b>\n"
-        f"🆔 <code>{user.id}</code>\n"
-        f"📛 @{user.username or 'ندارد'}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💰 موجودی: <code>{format_number(balance)}</code> DP\n"
-        f"📊 سطح: {level} | {title}\n"
-    )
-    if next_req:
-        text += f"📈 تا سطح {level+1}: <code>{format_number(needed)}</code>\n"
-
-    text += (
-        f"📊 کل دریافتی: <code>{format_number(total)}</code>\n"
-        f"👥 زیرمجموعه: {refs}\n"
-        f"{stars_text}"
-        f"{factory_info}"
-        f"{bank_info}"
-        f"{miner_info}"
-    )
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    kb = [[InlineKeyboardButton("🏴 ورود به ربات", url=f"https://t.me/{BOT_USERNAME}")]]
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def handle_leaderboard_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = db.get_leaderboard(10)
-    text = "🏆 <b>لیدربورد</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    for i, row in enumerate(rows, 1):
-        medal = medals.get(i, f"{i}.")
-        name = html.escape(row['first_name'] or str(row['user_id']))
-        text += f"{medal} <b>{name}</b> - <code>{format_number(row['dark_points'])}</code>\n"
-
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await context.bot.get_me()
-        BOT_USERNAME = me.username
-
-    kb = [[InlineKeyboardButton("🏴 ورود", url=f"https://t.me/{BOT_USERNAME}")]]
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))# ============ MINER GAME (GROUP) ============
-
-async def handle_miner_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """شروع یا نمایش ماینر در گروه"""
-    user = update.effective_user
-    
-    if db.get_setting('miner_active', '1') != '1':
-        await update.message.reply_text("❌ این بخش موقتاً غیرفعال می‌باشد.")
-        return
-
-    miner = db.get_miner(user.id)
-    
-    # کاربر ماینر ندارد - خرید
-    if not miner or miner['miner_level'] == 0:
-        balance = db.get_balance(user.id)
-        text = (
-            f"⚒ ✨ <b>ماینر دارکی</b> ✨ ⚒\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"❌ شما ماینر ندارید!\n\n"
-            f"💵 هزینه خرید: <code>{format_number(MINER_BUY_COST)}</code> DP\n"
-            f"💎 موجودی شما: <code>{format_number(balance)}</code> DP\n\n"
-            f"📊 <b>سطح ۱ (پیش‌فرض):</b>\n"
-            f"🪙 TON: 0.01/ساعت\n"
-            f"💵 USDT: 0.03/ساعت\n\n"
-            f"⚡ هزینه برق: هر <code>{format_number(MINER_ELECTRICITY_RATE)}</code> DP = ۱ ساعت کار\n\n"
-            f"🎯 با ماینر دارکی ارزهای TON و USDT ماین کنید!"
-        )
-        kb = [[InlineKeyboardButton(f"⚒ خرید ماینر ({format_number(MINER_BUY_COST)} DP)", callback_data=f"miner_buy_{user.id}")]]
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    # کاربر ماینر دارد - نمایش پنل
-    await show_miner_panel(update, context, user.id, as_reply=True)
-
-
-async def show_miner_panel(update, context, user_id, as_reply=False, query=None):
-    """نمایش پنل ماینر"""
-    # بروزرسانی موجودی
-    db.update_mining_balance(user_id)
-    
-    miner = db.get_miner(user_id)
-    if not miner:
-        return
-
-    level = miner['miner_level']
-    rates = MINER_LEVELS[level]
-    
-    is_mining = miner['is_mining']
-    currency = miner['mining_currency']
-    electricity_hours = miner['electricity_hours']
-    
-    status_emoji = "🟢" if is_mining else "🔴"
-    status_text = "در حال ماین" if is_mining else "خاموش"
-    
-    hours_remaining_text = ""
-    if electricity_hours > 0:
-        h = int(electricity_hours)
-        m = int((electricity_hours - h) * 60)
-        hours_remaining_text = f"\n⚡ برق باقیمانده: <b>{h}h {m}m</b>"
-    else:
-        hours_remaining_text = f"\n⚡ برق: <b>تمام شده!</b>"
-
-    mining_info = ""
-    if is_mining and currency:
-        curr_emoji = "🪙" if currency == 'ton' else "💵"
-        curr_name = "TON" if currency == 'ton' else "USDT"
-        mining_info = f"\n💎 در حال ماین: {curr_emoji} <b>{curr_name}</b>"
-
-    text = (
-        f"⚒ ✨ <b>ماینر دارکی شما</b> ✨ ⚒\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 کاربر: {get_user_display(update.effective_user) if hasattr(update, 'effective_user') else '-'}\n"
-        f"📊 سطح ماینر: <b>{level}</b>\n"
-        f"📊 وضعیت: {status_emoji} {status_text}"
-        f"{mining_info}"
-        f"{hours_remaining_text}\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>موجودی ارزها:</b>\n"
-        f"🪙 TON: <code>{format_crypto(miner['ton_balance'], 4)}</code>\n"
-        f"💵 USDT: <code>{format_crypto(miner['usdt_balance'], 4)}</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>نرخ ماین (سطح {level}):</b>\n"
-        f"🪙 TON: {rates['ton_per_hour']}/ساعت\n"
-        f"💵 USDT: {rates['usdt_per_hour']}/ساعت"
-    )
-
-    kb = []
-    
-    # دکمه شروع/توقف ماین
-    if is_mining:
-        kb.append([InlineKeyboardButton("⏹ توقف ماین", callback_data=f"miner_stop_{user_id}")])
-    else:
-        if electricity_hours > 0:
-            kb.append([
-                InlineKeyboardButton("🪙 ماین TON", callback_data=f"miner_start_ton_{user_id}"),
-                InlineKeyboardButton("💵 ماین USDT", callback_data=f"miner_start_usdt_{user_id}")
-            ])
-        else:
-            kb.append([InlineKeyboardButton("⚡ ابتدا برق شارژ کنید!", callback_data="miner_no_electricity")])
-    
-    # دکمه شارژ برق
-    kb.append([InlineKeyboardButton("⚡ شارژ اعتبار برق", callback_data=f"miner_charge_{user_id}")])
-    
-    # دکمه ارتقا
-    if level < 5:
-        upgrade_cost = rates['upgrade_cost']
-        kb.append([InlineKeyboardButton(f"⬆️ ارتقا به سطح {level+1} ({format_number(upgrade_cost)} DP)", callback_data=f"miner_upgrade_{user_id}")])
-    else:
-        kb.append([InlineKeyboardButton("🏆 حداکثر سطح!", callback_data="miner_max_level")])
-    
-    # دکمه بروزرسانی
-    kb.append([InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"miner_refresh_{user_id}")])
-
-    if query:
-        try:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            pass
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def miner_buy_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    target_id = int(query.data.split("_")[-1])
-    
-    if user.id != target_id:
-        await query.answer("❌ این برای شما نیست!", show_alert=True)
-        return
-
-    if not db.remove_dark_points(user.id, MINER_BUY_COST):
-        await query.answer(f"❌ نیاز به {format_number(MINER_BUY_COST)} DP!", show_alert=True)
-        return
-
-    db.create_miner(user.id)
-    await query.answer("✅ ماینر خریداری شد!", show_alert=True)
-    
-    await query.edit_message_text(
-        f"✅ <b>ماینر دارکی خریداری شد!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 سطح: <b>۱</b>\n"
-        f"🪙 TON: 0.01/ساعت\n"
-        f"💵 USDT: 0.03/ساعت\n\n"
-        f"⚡ <b>مرحله بعد:</b>\n"
-        f"ابتدا اعتبار برق شارژ کنید سپس ماین کنید!\n\n"
-        f"برای مدیریت دوباره بنویسید: <code>ماینر دارکی</code>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def miner_charge_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    target_id = int(query.data.split("_")[-1])
-    
-    if user.id != target_id:
-        await query.answer("❌ این برای شما نیست!", show_alert=True)
-        return
-
-    await query.answer()
-    context.user_data['awaiting_miner_charge'] = query.message.message_id
-    context.user_data['miner_chat_id'] = query.message.chat_id
-
-    balance = db.get_balance(user.id)
-    hours_available = balance // MINER_ELECTRICITY_RATE
-    
-    await query.edit_message_text(
-        f"⚡ <b>شارژ اعتبار برق</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"💰 نرخ: هر <code>{format_number(MINER_ELECTRICITY_RATE)}</code> DP = ۱ ساعت\n"
-        f"💎 موجودی: <code>{format_number(balance)}</code> DP\n"
-        f"⏰ حداکثر قابل شارژ: <b>{hours_available}</b> ساعت\n\n"
-        f"✏️ <b>مبلغ شارژ را روی این پیام ریپلای کنید:</b>\n"
-        f"(مبلغ به DP باشد)\n\n"
-        f"برای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def handle_miner_charge_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پاسخ به شارژ برق ماینر"""
-    user = update.effective_user
-    text = update.message.text.strip() if update.message.text else ""
-
-    if not update.message.reply_to_message:
-        return False
-
-    reply_msg_id = update.message.reply_to_message.message_id
-    expected_msg = context.user_data.get('awaiting_miner_charge')
-    
-    if expected_msg != reply_msg_id:
-        return False
-
-    try:
-        amount = int(text)
-    except Exception:
-        await update.message.reply_text("❌ فقط عدد بفرست!")
-        return True
-
-    if amount < MINER_ELECTRICITY_RATE:
-        await update.message.reply_text(
-            f"❌ حداقل مبلغ شارژ: <code>{format_number(MINER_ELECTRICITY_RATE)}</code> DP (برای ۱ ساعت)",
-            parse_mode=ParseMode.HTML
-        )
-        return True
-
-    balance = db.get_balance(user.id)
-    if balance < amount:
-        await update.message.reply_text(
-            f"❌ موجودی ناکافی!\n💰 موجودی: <code>{format_number(balance)}</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return True
-
-    # محاسبه ساعت‌های برق
-    hours = amount / MINER_ELECTRICITY_RATE
-    
-    db.remove_dark_points(user.id, amount)
-    db.add_electricity(user.id, hours)
-    
-    miner = db.get_miner(user.id)
-    total_hours = miner['electricity_hours']
-    h = int(total_hours)
-    m = int((total_hours - h) * 60)
-
-    context.user_data.pop('awaiting_miner_charge', None)
-    context.user_data.pop('miner_chat_id', None)
-
-    await update.message.reply_text(
-        f"✅ <b>برق شارژ شد!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"💵 مبلغ: <code>{format_number(amount)}</code> DP\n"
-        f"⚡ شارژ جدید: <b>{format_crypto(hours, 2)}</b> ساعت\n"
-        f"⏰ کل برق باقیمانده: <b>{h}h {m}m</b>\n\n"
-        f"💎 موجودی: <code>{format_number(db.get_balance(user.id))}</code>\n\n"
-        f"✨ حالا می‌توانید ماین کنید!\nبنویسید: <code>ماینر دارکی</code>",
-        parse_mode=ParseMode.HTML
-    )
-    return True
-
-
-async def miner_start_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    data = query.data
-    # format: miner_start_ton_123 or miner_start_usdt_123
-    parts = data.split("_")
-    currency = parts[2]  # ton or usdt
-    target_id = int(parts[3])
-    
-    if user.id != target_id:
-        await query.answer("❌ این برای شما نیست!", show_alert=True)
-        return
-
-    miner = db.get_miner(user.id)
-    if not miner:
-        await query.answer("❌ ماینر یافت نشد!", show_alert=True)
-        return
-
-    if miner['electricity_hours'] <= 0:
-        await query.answer("❌ ابتدا برق شارژ کنید!", show_alert=True)
-        return
-
-    if miner['is_mining']:
-        await query.answer("⚠️ از قبل در حال ماین!", show_alert=True)
-        return
-
-    db.start_mining(user.id, currency)
-    curr_name = "TON 🪙" if currency == 'ton' else "USDT 💵"
-    await query.answer(f"✅ ماین {curr_name} شروع شد!", show_alert=True)
-    
-    await show_miner_panel(update, context, user.id, query=query)
-
-
-async def miner_stop_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    target_id = int(query.data.split("_")[-1])
-    
-    if user.id != target_id:
-        await query.answer("❌ این برای شما نیست!", show_alert=True)
-        return
-
-    miner = db.get_miner(user.id)
-    if not miner or not miner['is_mining']:
-        await query.answer("❌ در حال ماین نیست!", show_alert=True)
-        return
-
-    db.stop_mining(user.id)
-    await query.answer("⏹ ماین متوقف شد.", show_alert=True)
-    await show_miner_panel(update, context, user.id, query=query)
-
-
-async def miner_upgrade_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    target_id = int(query.data.split("_")[-1])
-    
-    if user.id != target_id:
-        await query.answer("❌ این برای شما نیست!", show_alert=True)
-        return
-
-    miner = db.get_miner(user.id)
-    if not miner:
-        return
-    
-    if miner['miner_level'] >= 5:
-        await query.answer("🏆 حداکثر سطح!", show_alert=True)
-        return
-
-    upgrade_cost = MINER_LEVELS[miner['miner_level']]['upgrade_cost']
-    if not db.remove_dark_points(user.id, upgrade_cost):
-        await query.answer(f"❌ نیاز به {format_number(upgrade_cost)} DP!", show_alert=True)
-        return
-
-    db.upgrade_miner(user.id)
-    new_level = miner['miner_level'] + 1
-    new_rates = MINER_LEVELS[new_level]
-    
-    await query.answer(f"⬆️ ارتقا به سطح {new_level}!", show_alert=True)
-    await show_miner_panel(update, context, user.id, query=query)
-
-
-async def miner_refresh_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    target_id = int(query.data.split("_")[-1])
-    
-    if user.id != target_id:
-        await query.answer("❌ این برای شما نیست!", show_alert=True)
-        return
-    
-    await query.answer("🔄 بروزرسانی...")
-    await show_miner_panel(update, context, user.id, query=query)
-
-
-async def miner_no_electricity_cb(update, context):
-    query = update.callback_query
-    await query.answer("⚡ ابتدا اعتبار برق را شارژ کنید!", show_alert=True)
-
-
-async def miner_max_level_cb(update, context):
-    query = update.callback_query
-    await query.answer("🏆 شما به بالاترین سطح ماینر رسیدید!", show_alert=True)
-
-
-# ============ 2-PLAYER GAME ============
-
-async def handle_create_game(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if amount < MIN_GAME_AMOUNT:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(MIN_GAME_AMOUNT)}</code>", parse_mode=ParseMode.HTML)
-        return
-
-    balance = db.get_balance(user.id)
-    if balance < amount:
-        await update.message.reply_text(f"❌ موجودی ناکافی!", parse_mode=ParseMode.HTML)
-        return
-
-    db.remove_dark_points(user.id, amount)
-
-    msg = await update.message.reply_text(
-        f"🎮 ✨ <b>بازی جدید!</b> ✨ 🎮\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 سازنده: {get_user_display(user)}\n"
-        f"💰 ورود: <code>{format_number(amount)}</code>\n"
-        f"🏆 جایزه: <code>{format_number(amount * 2)}</code>\n\n"
-        f"⏳ منتظر حریف...",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎮 پیوستن به بازی", callback_data="join_game_0")],
-            [InlineKeyboardButton("❌ لغو", callback_data="cancel_game_0")],
-        ])
-    )
-
-    game_id = db.create_game(user.id, amount, chat.id, msg.message_id)
-    await msg.edit_reply_markup(InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎮 پیوستن به بازی", callback_data=f"join_game_{game_id}")],
-        [InlineKeyboardButton("❌ لغو", callback_data=f"cancel_game_{game_id}")],
-    ]))
-
-    asyncio.create_task(auto_cancel_game(context, game_id, chat.id, msg.message_id))
-
-
-async def auto_cancel_game(context, game_id, chat_id, message_id):
-    await asyncio.sleep(GAME_TIMEOUT)
-    game = db.get_game(game_id)
-    if game and game['status'] == 'waiting':
-        db.add_dark_points(game['creator_id'], game['amount'])
-        db.cancel_game(game_id)
-        try:
-            await context.bot.edit_message_text(
-                f"⏰ <b>بازی خودکار لغو شد</b>\n💰 مبلغ بازگردانده شد",
-                chat_id=chat_id,
-                message_id=message_id,
-                parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            pass
-
-
-async def join_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_id = int(query.data.split("_")[-1])
-
-    game = db.get_game(game_id)
-    if not game:
-        await query.answer("❌ یافت نشد!", show_alert=True)
-        return
-    if game['status'] != 'waiting':
-        await query.answer("❌ تمام شده!", show_alert=True)
-        return
-    if user.id == game['creator_id']:
-        await query.answer("❌ به بازی خودتان نمی‌توانید!", show_alert=True)
-        return
-
-    amount = game['amount']
-    if db.get_balance(user.id) < amount:
-        await query.answer(f"❌ نیاز: {format_number(amount)}", show_alert=True)
-        return
-
-    db.remove_dark_points(user.id, amount)
-    db.join_game(game_id, user.id)
-
-    await query.answer("🎮 مشخص کردن برنده...")
-    await asyncio.sleep(2)
-
-    players = [game['creator_id'], user.id]
-    winner_id = random.choice(players)
-    loser_id = players[0] if winner_id == players[1] else players[1]
-
-    prize = amount * 2
-    db.add_dark_points(winner_id, prize)
-    db.finish_game(game_id, winner_id, loser_id)
-
-    winner_display = await get_user_mention(context, winner_id)
-    loser_display = await get_user_mention(context, loser_id)
-
-    await query.edit_message_text(
-        f"🎮 ✨ <b>نتیجه بازی!</b> ✨ 🎮\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🏆 برنده: {winner_display}\n💰 +<code>{format_number(prize)}</code>\n\n"
-        f"💔 بازنده: {loser_display}",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def cancel_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_id = int(query.data.split("_")[-1])
-
-    game = db.get_game(game_id)
-    if not game:
-        return
-    if user.id != game['creator_id']:
-        await query.answer("❌ فقط سازنده!", show_alert=True)
-        return
-    if game['status'] != 'waiting':
-        return
-
-    db.add_dark_points(game['creator_id'], game['amount'])
-    db.cancel_game(game_id)
-    await query.edit_message_text(f"❌ لغو شد\n💰 <code>{format_number(game['amount'])}</code> بازگردانده شد", parse_mode=ParseMode.HTML)
-
-
-# ============ TRANSFER WITH LIMIT ============
-
-async def handle_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text.strip()
-
-    can_tr, remaining = db.can_transfer(user.id)
-    if not can_tr:
-        hours = int(remaining // 3600)
-        mins = int((remaining % 3600) // 60)
-        await update.message.reply_text(
-            f"⚠️ <b>سقف انتقال روزانه پر شده!</b>\n📊 سقف: {MAX_DAILY_TRANSFERS}\n⏰ بازگشایی: {hours}h {mins}m",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    if update.message.reply_to_message:
-        parts = text.split()
-        if len(parts) >= 2:
-            try:
-                amount = int(parts[1])
-            except Exception:
-                await update.message.reply_text("❌ مبلغ نامعتبر!")
-                return
-
-            target_id = update.message.reply_to_message.from_user.id
-            if target_id == user.id:
-                await update.message.reply_text("❌ به خودتان نمی‌توانید!")
-                return
-            if db.is_banned(target_id):
-                await update.message.reply_text("❌ کاربر مسدود!")
-                return
-
-            fee = int(amount * TRANSFER_FEE)
-            total_cost = amount + fee
-            balance = db.get_balance(user.id)
-
-            if balance < total_cost:
-                await update.message.reply_text(
-                    f"❌ موجودی ناکافی!\n💰 نیاز: <code>{format_number(total_cost)}</code>",
-                    parse_mode=ParseMode.HTML
-                )
-                return
-
-            if not db.remove_dark_points(user.id, total_cost):
-                return
-
-            if not db.get_user(target_id):
-                target = update.message.reply_to_message.from_user
-                db.create_user(target_id, target.username or "", target.first_name or "")
-
-            db.add_dark_points(target_id, amount)
-            db.record_transfer(user.id, target_id, amount, fee)
-            db.increment_transfer_count(user.id)
-
-            u = db.get_user(user.id)
-            target = update.message.reply_to_message.from_user
-            target_display = f"@{target.username}" if target.username else f"<code>{target.id}</code>"
-
-            await update.message.reply_text(
-                f"✅ ✨ <b>انتقال موفق!</b> ✨ ✅\n━━━━━━━━━━━━━━━━━━\n\n"
-                f"💰 مبلغ: <code>{format_number(amount)}</code>\n"
-                f"💸 کارمزد: <code>{format_number(fee)}</code>\n"
-                f"👤 مقصد: {target_display}\n"
-                f"💎 موجودی: <code>{format_number(db.get_balance(user.id))}</code>\n\n"
-                f"📊 انتقال‌های امروز: {u['transfer_count_today']}/{MAX_DAILY_TRANSFERS}",
-                parse_mode=ParseMode.HTML
-            )
-            try:
-                await context.bot.send_message(
-                    target_id,
-                    f"💰 <b>DP دریافتی!</b>\n👤 از: {get_user_display(user)}\n💰 <code>{format_number(amount)}</code>",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-            return
-
-    match = re.match(r'انتقال\s+(\d+)\s+به\s+(\d+)', text)
-    if match:
-        amount = int(match.group(1))
-        target_id = int(match.group(2))
-        if target_id == user.id:
-            return
-        target_user = db.get_user(target_id)
-        if not target_user:
-            await update.message.reply_text("❌ کاربر یافت نشد!")
-            return
-
-        fee = int(amount * TRANSFER_FEE)
-        if db.get_balance(user.id) < amount + fee:
-            await update.message.reply_text("❌ موجودی ناکافی!")
-            return
-
-        db.remove_dark_points(user.id, amount + fee)
-        db.add_dark_points(target_id, amount)
-        db.record_transfer(user.id, target_id, amount, fee)
-        db.increment_transfer_count(user.id)
-
-        u = db.get_user(user.id)
-        await update.message.reply_text(
-            f"✅ انتقال موفق!\n💰 <code>{format_number(amount)}</code> به <code>{target_id}</code>\n📊 {u['transfer_count_today']}/{MAX_DAILY_TRANSFERS}",
-            parse_mode=ParseMode.HTML
-        )
-        try:
-            await context.bot.send_message(
-                target_id,
-                f"💰 DP دریافتی: <code>{format_number(amount)}</code>",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            pass
-
-
-# ============ BANK ============
-
-async def handle_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = db.get_user(user.id)
-    total_bank = db.get_total_bank_balance()
-
-    if not u['bank_account']:
-        kb = [[InlineKeyboardButton(f"🏦 افتتاح ({format_number(BANK_OPEN_COST)} DP)", callback_data="bank_open")]]
-        await update.message.reply_text(
-            f"🏦 <b>بانک دارکی</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"❌ حسابی ندارید\n\n"
-            f"💵 افتتاح: <code>{format_number(BANK_OPEN_COST)}</code>\n"
-            f"📈 سود ۲۴ ساعته: <b>۱۵٪</b>\n\n"
-            f"🏦 کل بانک: <code>{format_number(total_bank)}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    else:
-        elapsed = time.time() - u['bank_deposit_time'] if u['bank_deposit_time'] > 0 else 0
-        interest_ready = elapsed >= 86400 and u['bank_balance'] > 0 and not u['bank_interest_collected']
-        potential = int(u['bank_balance'] * BANK_INTEREST_RATE) if interest_ready else 0
-
-        buttons = []
-        if u['bank_balance'] == 0:
-            buttons.append([InlineKeyboardButton("💰 واریز", callback_data="bank_deposit")])
-        else:
-            if interest_ready:
-                buttons.append([InlineKeyboardButton("💸 برداشت (با سود ۱۵٪)", callback_data="bank_withdraw")])
-            else:
-                remaining = max(0, 86400 - elapsed)
-                h = int(remaining // 3600)
-                m = int((remaining % 3600) // 60)
-                buttons.append([InlineKeyboardButton(f"⏰ {h}h {m}m تا سود", callback_data="bank_wait")])
-            buttons.append([InlineKeyboardButton("💰 واریز بیشتر", callback_data="bank_deposit")])
-            buttons.append([InlineKeyboardButton("💸 برداشت بدون سود", callback_data="bank_withdraw")])
-
-        text = (
-            f"🏦 <b>بانک دارکی</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"💳 کارت: <code>{u['bank_card']}</code>\n"
-            f"💰 موجودی: <code>{format_number(u['bank_balance'])}</code>\n"
-        )
-        if potential > 0:
-            text += f"📈 سود آماده: +<code>{format_number(potential)}</code>\n"
-        text += f"\n🏦 کل بانک: <code>{format_number(total_bank)}</code>"
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def bank_open_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    if db.get_balance(user.id) < BANK_OPEN_COST:
-        await query.answer(f"❌ نیاز: {format_number(BANK_OPEN_COST)}", show_alert=True)
-        return
-    kb = [
-        [InlineKeyboardButton("🎲 خودکار", callback_data="bank_auto_card")],
-        [InlineKeyboardButton("✏️ دلخواه", callback_data="bank_custom_card")],
-    ]
-    await query.edit_message_text(
-        f"🏦 افتتاح حساب\n💵 هزینه: <code>{format_number(BANK_OPEN_COST)}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-
-async def bank_auto_card_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    if db.get_balance(user.id) < BANK_OPEN_COST:
-        return
-    card = db.generate_bank_card()
-    while db.card_exists(card):
-        card = db.generate_bank_card()
-    db.remove_dark_points(user.id, BANK_OPEN_COST)
-    db.open_bank_account(user.id, card)
-    await query.edit_message_text(f"✅ حساب افتتاح شد!\n💳 <code>{card}</code>", parse_mode=ParseMode.HTML)
-
-
-async def bank_custom_card_cb(update, context):
-    query = update.callback_query
-    await query.answer()
-    context.user_data['awaiting_bank_card'] = True
-    await query.edit_message_text("✏️ شماره ۱۳ رقمی در پیوی بفرست:")
-
-
-async def bank_deposit_cb(update, context):
-    query = update.callback_query
-    await query.answer()
-    context.user_data['awaiting_bank_deposit'] = True
-    balance = db.get_balance(query.from_user.id)
-    await query.edit_message_text(
-        f"💰 واریز\n💎 موجودی: <code>{format_number(balance)}</code>\n\nمبلغ را در پیوی بفرست:",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def bank_withdraw_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    balance, interest = db.bank_withdraw(user.id)
-    total = balance + interest
-    if total == 0:
-        await query.answer("❌ موجودی ندارید!", show_alert=True)
-        return
-    await query.edit_message_text(
-        f"✅ <b>برداشت موفق</b>\n💰 اصل: <code>{format_number(balance)}</code>\n📈 سود: +<code>{format_number(interest)}</code>\n💎 کل: <code>{format_number(total)}</code>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def bank_wait_cb(update, context):
-    query = update.callback_query
-    await query.answer("⏰ ۲۴ ساعت صبر کنید", show_alert=True)
-
-
-# ============ FACTORY ============
-
-async def handle_factory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = db.get_user(user.id)
-
-    if u['factory_level'] == 0:
-        kb = [[InlineKeyboardButton(f"🏭 افتتاح ({format_number(FACTORY_OPEN_COST)})", callback_data="factory_open")]]
-        await update.message.reply_text(
-            f"🏭 <b>کارخونه دارکی</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"❌ کارخونه ندارید\n\n"
-            f"💵 افتتاح: <code>{format_number(FACTORY_OPEN_COST)}</code>\n"
-            f"🔧 نگهداری: ساعتی ۸۰ DP",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-        return
-
-    if not u['factory_active']:
-        f_level = u['factory_level']
-        mine_rate = FACTORY_LEVELS[f_level]['mine_per_min']
-        kb = [
-            [InlineKeyboardButton("🔄 فعال‌سازی مجدد", callback_data="factory_reactivate")],
-            [InlineKeyboardButton("💰 جمع‌آوری", callback_data="factory_collect")],
-        ]
-        await update.message.reply_text(
-            f"🏭 <b>کارخونه غیرفعال</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊 سطح: {f_level}\n⚡ نرخ: {mine_rate} DP/دقیقه\n"
-            f"⚠️ کمبود موجودی!\n\n"
-            f"💎 موجودی: <code>{format_number(db.get_balance(user.id))}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-        return
-
-    mined = db.collect_factory(user.id)
-    maintenance = db.factory_maintenance_due(user.id)
-    u = db.get_user(user.id)
-    f_level = u['factory_level']
-    mine_rate = FACTORY_LEVELS[f_level]['mine_per_min']
-
-    buttons = []
-    if f_level < 5:
-        upgrade_cost = FACTORY_LEVELS[f_level]['upgrade_cost']
-        buttons.append([InlineKeyboardButton(f"⬆️ ارتقا به {f_level+1} ({format_number(upgrade_cost)})", callback_data="factory_upgrade")])
-    buttons.append([InlineKeyboardButton("💰 جمع‌آوری", callback_data="factory_collect")])
-
-    text = (
-        f"🏭 <b>کارخونه دارکی</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 سطح: <b>{f_level}</b>\n⚡ نرخ: <b>{mine_rate}</b> DP/دقیقه\n"
-        f"📋 ✅ فعال\n"
-    )
-    if mined > 0:
-        text += f"💰 جمع‌آوری: +<code>{format_number(mined)}</code>\n"
-    text += f"\n💎 موجودی: <code>{format_number(db.get_balance(user.id))}</code>"
-
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def factory_open_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    if db.get_balance(user.id) < FACTORY_OPEN_COST:
-        await query.answer(f"❌ نیاز: {format_number(FACTORY_OPEN_COST)}", show_alert=True)
-        return
-    db.remove_dark_points(user.id, FACTORY_OPEN_COST)
-    db.open_factory(user.id)
-    await query.edit_message_text(f"✅ کارخونه افتتاح شد!", parse_mode=ParseMode.HTML)
-
-
-async def factory_reactivate_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    u = db.get_user(user.id)
-    if not u or u['factory_level'] == 0:
-        return
-    if u['factory_active']:
-        await query.answer("✅ فعال است!", show_alert=True)
-        return
-    if db.get_balance(user.id) < FACTORY_HOURLY_MAINTENANCE:
-        await query.answer(f"❌ حداقل {FACTORY_HOURLY_MAINTENANCE} DP!", show_alert=True)
-        return
-    db.reactivate_factory(user.id)
-    await query.edit_message_text(f"✅ کارخونه فعال شد!\n🏭 سطح {u['factory_level']}", parse_mode=ParseMode.HTML)
-
-
-async def factory_upgrade_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    u = db.get_user(user.id)
-    if not u or u['factory_level'] >= 5:
-        return
-    cost = FACTORY_LEVELS[u['factory_level']]['upgrade_cost']
-    if db.get_balance(user.id) < cost:
-        await query.answer(f"❌ نیاز: {format_number(cost)}", show_alert=True)
-        return
-    db.collect_factory(user.id)
-    db.remove_dark_points(user.id, cost)
-    db.upgrade_factory(user.id)
-    new_level = u['factory_level'] + 1
-    new_rate = FACTORY_LEVELS[new_level]['mine_per_min']
-    await query.edit_message_text(
-        f"⬆️ ارتقا یافت!\n📊 سطح {new_level}\n⚡ {new_rate} DP/دقیقه",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def factory_collect_cb(update, context):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-    mined = db.collect_factory(user.id)
-    db.factory_maintenance_due(user.id)
-    await query.answer(f"💰 {format_number(mined)} DP جمع شد!", show_alert=True)# ============ CRASH GAME ============
-
-def generate_crash_point():
-    r = random.random()
-    if r < 0.35:
-        return round(random.uniform(1.01, 1.5), 2)
-    elif r < 0.70:
-        return round(random.uniform(1.5, 3.0), 2)
-    elif r < 0.90:
-        return round(random.uniform(3.0, 6.0), 2)
-    else:
-        return round(random.uniform(6.0, CRASH_MAX_MULTIPLIER), 2)
-
-
-async def handle_crash_game_group(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
-    user = update.effective_user
-
-    if db.get_setting('crash_active', '1') != '1':
-        await update.message.reply_text("❌ این بخش موقتاً غیرفعال می‌باشد.")
-        return
-
-    if amount < CRASH_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(CRASH_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return
-    if amount > CRASH_MAX_BET:
-        await update.message.reply_text(f"❌ حداکثر: <code>{format_number(CRASH_MAX_BET)}</code>", parse_mode=ParseMode.HTML)
-        return
-
-    balance = db.get_balance(user.id)
-    if balance < amount:
-        await update.message.reply_text(f"❌ موجودی ناکافی!", parse_mode=ParseMode.HTML)
-        return
-
-    db.remove_dark_points(user.id, amount)
-    crash_point = generate_crash_point()
-
-    msg = await update.message.reply_text(
-        f"💥 ✨ <b>بازی انفجار شروع شد!</b> ✨ 💥\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 بازیکن: {get_user_display(user)}\n"
-        f"💰 شرط: <code>{format_number(amount)}</code>\n\n"
-        f"🚀 ضریب: <code>1.00x</code>\n⚡️ آماده شوید...",
-        parse_mode=ParseMode.HTML
-    )
-
-    game_id = db.create_crash_game(user.id, amount, crash_point, update.effective_chat.id, msg.message_id)
-
-    await msg.edit_text(
-        f"💥 <b>بازی انفجار زنده</b> 💥\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-        f"🚀 ضریب: <code>1.00x</code>\n💎 برد فعلی: <code>{format_number(amount)}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 برداشت (Cash Out)", callback_data=f"crash_out_{game_id}")]])
-    )
-
-    asyncio.create_task(run_crash_animation(context, game_id, user.id, amount, crash_point, msg.chat_id, msg.message_id, user))
-
-
-async def run_crash_animation(context, game_id, user_id, bet, crash_point, chat_id, message_id, user_obj):
-    current = 1.00
-    step = 0.1
-    delay = 1.5
-
-    while current < crash_point:
-        g = db.get_crash_game(game_id)
-        if not g or g['status'] != 'playing':
-            return
-
-        await asyncio.sleep(delay)
-        current = round(current + step, 2)
-        if current >= crash_point:
-            current = crash_point
-
-        if current > 2: step = 0.15; delay = 1.2
-        if current > 4: step = 0.25; delay = 1.0
-        if current > 7: step = 0.4; delay = 0.8
-
-        potential_win = int(bet * current)
-
-        try:
-            await context.bot.edit_message_text(
-                f"💥 <b>بازی انفجار زنده</b> 💥\n━━━━━━━━━━━━━━━━━━\n\n"
-                f"👤 {get_user_display(user_obj)}\n💰 شرط: <code>{format_number(bet)}</code>\n\n"
-                f"🚀 ضریب: <code>{current}x</code> 📈\n💎 برد: <code>{format_number(potential_win)}</code>",
-                chat_id=chat_id, message_id=message_id, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"💰 برداشت در {current}x", callback_data=f"crash_out_{game_id}")]])
-            )
-        except Exception:
-            pass
-
-        if current >= crash_point:
-            break
-
-    g = db.get_crash_game(game_id)
-    if g and g['status'] == 'playing':
-        db.crash_game_lost(game_id)
-        db.increment_crash_stats(user_id, won=False)
-        try:
-            await context.bot.edit_message_text(
-                f"💥💥💥 <b>منفجر شد!</b> 💥💥💥\n━━━━━━━━━━━━━━━━━━\n\n"
-                f"👤 {get_user_display(user_obj)}\n💰 شرط: <code>{format_number(bet)}</code>\n\n"
-                f"💥 ضریب انفجار: <code>{crash_point}x</code>\n😔 نتیجه: باختی!\n\n"
-                f"💎 موجودی: <code>{format_number(db.get_balance(user_id))}</code>",
-                chat_id=chat_id, message_id=message_id, parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            pass
-
-
-async def crash_out_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_id = int(query.data.split("_")[-1])
-
-    g = db.get_crash_game(game_id)
-    if not g:
-        await query.answer("❌ یافت نشد!", show_alert=True)
-        return
-    if g['user_id'] != user.id:
-        await query.answer("❌ این بازی شما نیست!", show_alert=True)
-        return
-    if g['status'] != 'playing':
-        await query.answer("❌ تمام شده!", show_alert=True)
-        return
-
-    msg_text = query.message.text
-    match = re.search(r'(\d+\.\d+)x', msg_text)
-    if not match:
-        await query.answer("❌ خطا!", show_alert=True)
-        return
-
-    current_mult = float(match.group(1))
-    win_amount = int(g['bet_amount'] * current_mult)
-    profit = win_amount - g['bet_amount']
-
-    if db.cashout_crash_game(game_id, current_mult, profit):
-        db.add_dark_points(user.id, win_amount)
-        db.increment_crash_stats(user.id, won=True)
-        await query.answer(f"✅ +{format_number(win_amount)} DP", show_alert=True)
-        await query.edit_message_text(
-            f"🎉 🏆 <b>برنده شدی!</b> 🏆 🎉\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(g['bet_amount'])}</code>\n\n"
-            f"💎 ضریب: <code>{current_mult}x</code>\n🏆 برد: <code>{format_number(win_amount)}</code>\n"
-            f"📈 سود: +<code>{format_number(profit)}</code>\n\n"
-            f"💎 موجودی: <code>{format_number(db.get_balance(user.id))}</code>",
-            parse_mode=ParseMode.HTML
-        )
-
-
-# ============ DICE GAME ============
-
-dice_games = {}
-
-async def cleanup_game_dict(game_dict, key, delay):
-    await asyncio.sleep(delay)
-    if key in game_dict:
-        del game_dict[key]
-
-
-async def auto_cancel_dice(game_key, delay=GAME_TIMEOUT):
-    await asyncio.sleep(delay)
-    game = dice_games.get(game_key)
-    if game and game['status'] == 'picking':
-        db.add_dark_points(game['user_id'], game['amount'])
-        game['status'] = 'auto_cancelled'
-        if game_key in dice_games:
-            del dice_games[game_key]
-
-
-async def handle_dice_game_group(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
-    user = update.effective_user
-
-    if db.get_setting('dice_active', '1') != '1':
-        await update.message.reply_text("❌ این بخش موقتاً غیرفعال می‌باشد.")
-        return
-
-    for k, g in list(dice_games.items()):
-        if g['user_id'] == user.id and g['status'] == 'picking':
-            await update.message.reply_text("❌ شما یک بازی تاس باز دارید!")
-            return
-
-    if amount < DICE_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(DICE_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return
-
-    balance = db.get_balance(user.id)
-    if balance < amount:
-        await update.message.reply_text(f"❌ موجودی ناکافی!")
-        return
-
-    db.remove_dark_points(user.id, amount)
-
-    kb = [
-        [InlineKeyboardButton("1️⃣", callback_data="dice_pick_1"),
-         InlineKeyboardButton("2️⃣", callback_data="dice_pick_2"),
-         InlineKeyboardButton("3️⃣", callback_data="dice_pick_3")],
-        [InlineKeyboardButton("4️⃣", callback_data="dice_pick_4"),
-         InlineKeyboardButton("5️⃣", callback_data="dice_pick_5"),
-         InlineKeyboardButton("6️⃣", callback_data="dice_pick_6")],
-        [InlineKeyboardButton("🎲 پرتاب تاس", callback_data="dice_roll")],
-        [InlineKeyboardButton("❌ لغو", callback_data="dice_cancel")],
-    ]
-
-    msg = await update.message.reply_text(
-        f"🎲 ✨ <b>بازی تاس دارکی</b> ✨ 🎲\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-        f"🎯 ضرایب:\n• ۱ عدد: ۶x | ۲ عدد: ۳x | ۳ عدد: ۱.۵x\n\n"
-        f"📌 اعداد: <code>هیچ</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-    game_key = f"{msg.chat_id}_{msg.message_id}"
-    dice_games[game_key] = {
-        'user_id': user.id, 'user_obj': user, 'amount': amount,
-        'picks': [], 'chat_id': msg.chat_id, 'message_id': msg.message_id,
-        'status': 'picking', 'created_at': time.time(),
-    }
-    asyncio.create_task(auto_cancel_dice(game_key))
-
-
-async def dice_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    picked = int(query.data.split("_")[-1])
-
-    game_key = f"{query.message.chat_id}_{query.message.message_id}"
-    game = dice_games.get(game_key)
-
-    if not game:
-        await query.answer("❌ یافت نشد!", show_alert=True)
-        return
-    if game['user_id'] != user.id:
-        await query.answer("❌ این بازی شما نیست!", show_alert=True)
-        return
-    if game['status'] != 'picking':
-        return
-
-    picks = game['picks']
-    if picked in picks:
-        picks.remove(picked)
-        await query.answer(f"❌ {picked} حذف شد")
-    else:
-        if len(picks) >= 3:
-            await query.answer("⚠️ حداکثر ۳!", show_alert=True)
-            return
-        picks.append(picked)
-        await query.answer(f"✅ {picked}")
-
-    game['picks'] = picks
-    picks_display = " - ".join([str(p) for p in sorted(picks)]) if picks else "هیچ"
-
-    if len(picks) == 1: mult_text = "۶ برابر 🥇"
-    elif len(picks) == 2: mult_text = "۳ برابر 🥈"
-    elif len(picks) == 3: mult_text = "۱.۵ برابر 🥉"
-    else: mult_text = "بدون انتخاب"
-
-    def get_btn(num):
-        emoji_map = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
-        label = emoji_map[num]
-        if num in picks: label = f"✅ {label}"
-        return InlineKeyboardButton(label, callback_data=f"dice_pick_{num}")
-
-    kb = [
-        [get_btn(1), get_btn(2), get_btn(3)],
-        [get_btn(4), get_btn(5), get_btn(6)],
-        [InlineKeyboardButton("🎲 پرتاب تاس", callback_data="dice_roll")],
-        [InlineKeyboardButton("❌ لغو", callback_data="dice_cancel")],
-    ]
-
-    try:
-        await query.edit_message_text(
-            f"🎲 <b>بازی تاس</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-            f"📌 اعداد: <code>{picks_display}</code>\n💎 ضریب: {mult_text}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    except Exception:
-        pass
-
-
-async def dice_roll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    game_key = f"{query.message.chat_id}_{query.message.message_id}"
-    game = dice_games.get(game_key)
-
-    if not game or game['user_id'] != user.id or game['status'] != 'picking':
-        return
-    if len(game['picks']) == 0:
-        await query.answer("⚠️ حداقل یک عدد!", show_alert=True)
-        return
-
-    game['status'] = 'rolling'
-    await query.answer("🎲 پرتاب...")
-
-    dice_msg = await context.bot.send_dice(chat_id=game['chat_id'], emoji='🎲')
-    dice_value = dice_msg.dice.value
-    await asyncio.sleep(4)
-
-    picks = game['picks']
-    amount = game['amount']
-    won = dice_value in picks
-
-    if len(picks) == 1: multiplier = 6.0; mult_display = "۶ برابر"
-    elif len(picks) == 2: multiplier = 3.0; mult_display = "۳ برابر"
-    else: multiplier = 1.5; mult_display = "۱.۵ برابر"
-
-    picks_display = " - ".join([str(p) for p in sorted(picks)])
-
-    if won:
-        prize = int(amount * multiplier)
-        db.add_dark_points(user.id, prize)
-        text = (
-            f"🎉 🏆 <b>برنده شدی!</b> 🏆 🎉\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"🎲 عدد تاس: <b>{dice_value}</b>\n📌 اعداد شما: <code>{picks_display}</code>\n"
-            f"💎 ضریب: {mult_display}\n\n🏆 برد: +<code>{format_number(prize)}</code>\n"
-            f"💰 موجودی: <code>{format_number(db.get_balance(user.id))}</code>"
-        )
-    else:
-        text = (
-            f"💔 <b>باختی!</b> 💔\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"🎲 عدد تاس: <b>{dice_value}</b>\n📌 اعداد شما: <code>{picks_display}</code>"
-        )
-
-    try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-    game['status'] = 'finished'
-    asyncio.create_task(cleanup_game_dict(dice_games, game_key, 30))
-
-
-async def dice_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_key = f"{query.message.chat_id}_{query.message.message_id}"
-    game = dice_games.get(game_key)
-    if not game or game['user_id'] != user.id:
-        return
-    if game['status'] != 'picking':
-        return
-    db.add_dark_points(user.id, game['amount'])
-    game['status'] = 'cancelled'
-    await query.edit_message_text(f"❌ لغو شد\n💰 <code>{format_number(game['amount'])}</code> بازگردانده شد", parse_mode=ParseMode.HTML)
-    if game_key in dice_games:
-        del dice_games[game_key]
-
-
-# ============ GUESS GAME ============
-
-guess_games = {}
-
-async def auto_cancel_guess(game_key, delay=GAME_TIMEOUT):
-    await asyncio.sleep(delay)
-    game = guess_games.get(game_key)
-    if game and game['status'] in ['picking', 'awaiting_bet']:
-        if game['amount'] > 0:
-            db.add_dark_points(game['user_id'], game['amount'])
-        game['status'] = 'auto_cancelled'
-        if game_key in guess_games:
-            del guess_games[game_key]
-
-
-async def handle_guess_game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if db.get_setting('guess_active', '1') != '1':
-        await update.message.reply_text("❌ این بخش موقتاً غیرفعال می‌باشد.")
-        return
-
-    for k, g in list(guess_games.items()):
-        if g['user_id'] == user.id and g['status'] in ['awaiting_bet', 'picking']:
-            await update.message.reply_text("❌ شما یک حدس بزن باز دارید!")
-            return
-
-    balance = db.get_balance(user.id)
-    if balance < GUESS_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(GUESS_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return
-
-    msg = await update.message.reply_text(
-        f"🎯 ✨ <b>بازی حدس بزن</b> ✨ 🎯\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n\n"
-        f"🎯 عدد بین ۱ تا ۱۰ حدس بزن!\n"
-        f"💰 حداقل: <code>{format_number(GUESS_MIN_BET)}</code>\n\n"
-        f"📊 ضرایب:\n• ۱: ۱۰x | ۲: ۵x | ۳: ۲.۵x | ۴: ۱.۲x\n\n"
-        f"✏️ مبلغ شرط را ریپلای کن:",
-        parse_mode=ParseMode.HTML
-    )
-
-    game_key = f"guess_{user.id}_{msg.message_id}"
-    guess_games[game_key] = {
-        'user_id': user.id, 'user_obj': user, 'status': 'awaiting_bet',
-        'chat_id': msg.chat_id, 'message_id': msg.message_id,
-        'picks': [], 'amount': 0, 'created_at': time.time(),
-    }
-    asyncio.create_task(auto_cancel_guess(game_key))
-
-
-async def handle_guess_bet_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text.strip() if update.message.text else ""
-
-    if not update.message.reply_to_message:
-        return False
-
-    reply_msg_id = update.message.reply_to_message.message_id
-    game_key = None
-    for k, g in list(guess_games.items()):
-        if g['user_id'] == user.id and g['message_id'] == reply_msg_id and g['status'] == 'awaiting_bet':
-            game_key = k
-            break
-
-    if not game_key:
-        return False
-
-    try:
-        amount = int(text)
-    except Exception:
-        await update.message.reply_text("❌ عدد!")
-        return True
-
-    if amount < GUESS_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(GUESS_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return True
-
-    if db.get_balance(user.id) < amount:
-        await update.message.reply_text("❌ موجودی ناکافی!")
-        return True
-
-    db.remove_dark_points(user.id, amount)
-    game = guess_games[game_key]
-    game['amount'] = amount
-    game['status'] = 'picking'
-
-    kb = [
-        [InlineKeyboardButton("1️⃣", callback_data="guess_pick_1"),
-         InlineKeyboardButton("2️⃣", callback_data="guess_pick_2"),
-         InlineKeyboardButton("3️⃣", callback_data="guess_pick_3"),
-         InlineKeyboardButton("4️⃣", callback_data="guess_pick_4"),
-         InlineKeyboardButton("5️⃣", callback_data="guess_pick_5")],
-        [InlineKeyboardButton("6️⃣", callback_data="guess_pick_6"),
-         InlineKeyboardButton("7️⃣", callback_data="guess_pick_7"),
-         InlineKeyboardButton("8️⃣", callback_data="guess_pick_8"),
-         InlineKeyboardButton("9️⃣", callback_data="guess_pick_9"),
-         InlineKeyboardButton("🔟", callback_data="guess_pick_10")],
-        [InlineKeyboardButton("🎯 تایید", callback_data="guess_confirm")],
-        [InlineKeyboardButton("❌ لغو", callback_data="guess_cancel")],
-    ]
-
-    new_msg = await update.message.reply_text(
-        f"🎯 <b>بازی حدس بزن</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-        f"📌 انتخابی: <code>هیچ</code>\n⚡️ حداکثر ۴ عدد + تایید",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-    game['message_id'] = new_msg.message_id
-    new_key = f"guess_{user.id}_{new_msg.message_id}"
-    guess_games[new_key] = guess_games.pop(game_key)
-    return True
-
-
-async def guess_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    picked = int(query.data.split("_")[-1])
-
-    game_key = None
-    for k, g in list(guess_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = guess_games[game_key]
-    if game['user_id'] != user.id:
-        await query.answer("❌ این بازی شما نیست!", show_alert=True)
-        return
-    if game['status'] != 'picking':
-        return
-
-    picks = game['picks']
-    if picked in picks:
-        picks.remove(picked)
-        await query.answer(f"❌ {picked} حذف")
-    else:
-        if len(picks) >= 4:
-            await query.answer("⚠️ حداکثر ۴!", show_alert=True)
-            return
-        picks.append(picked)
-        await query.answer(f"✅ {picked}")
-
-    game['picks'] = picks
-    picks_display = " - ".join([str(p) for p in sorted(picks)]) if picks else "هیچ"
-
-    if len(picks) == 1: mult_text = "۱۰ برابر 🥇"
-    elif len(picks) == 2: mult_text = "۵ برابر 🥈"
-    elif len(picks) == 3: mult_text = "۲.۵ برابر 🥉"
-    elif len(picks) == 4: mult_text = "۱.۲ برابر"
-    else: mult_text = "بدون انتخاب"
-
-    emoji_map = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
-                 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}
-
-    def get_btn(num):
-        label = emoji_map[num]
-        if num in picks: label = f"✅{label}"
-        return InlineKeyboardButton(label, callback_data=f"guess_pick_{num}")
-
-    kb = [
-        [get_btn(1), get_btn(2), get_btn(3), get_btn(4), get_btn(5)],
-        [get_btn(6), get_btn(7), get_btn(8), get_btn(9), get_btn(10)],
-        [InlineKeyboardButton("🎯 تایید", callback_data="guess_confirm")],
-        [InlineKeyboardButton("❌ لغو", callback_data="guess_cancel")],
-    ]
-
-    try:
-        await query.edit_message_text(
-            f"🎯 <b>بازی حدس بزن</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-            f"📌 انتخابی: <code>{picks_display}</code>\n💎 ضریب: {mult_text}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    except Exception:
-        pass
-
-
-async def guess_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    game_key = None
-    for k, g in list(guess_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = guess_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['status'] != 'picking' or len(game['picks']) == 0:
-        await query.answer("⚠️ حداقل یک عدد!", show_alert=True)
-        return
-
-    game['status'] = 'rolling'
-    await query.answer("🎯 انتخاب عدد...")
-
-    try:
-        await query.edit_message_text(f"🎯 <b>در حال انتخاب...</b>\n\n🎰 🎰 🎰", parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-    await asyncio.sleep(3)
-
-    picked_number = random.randint(1, 10)
-    picks = game['picks']
-    amount = game['amount']
-    won = picked_number in picks
-
-    if len(picks) == 1: multiplier = 10.0; mult_display = "۱۰ برابر"
-    elif len(picks) == 2: multiplier = 5.0; mult_display = "۵ برابر"
-    elif len(picks) == 3: multiplier = 2.5; mult_display = "۲.۵ برابر"
-    else: multiplier = 1.2; mult_display = "۱.۲ برابر"
-
-    picks_display = " - ".join([str(p) for p in sorted(picks)])
-
-    if won:
-        prize = int(amount * multiplier)
-        db.add_dark_points(user.id, prize)
-        text = (
-            f"🎉 🏆 <b>برنده شدی!</b> 🏆 🎉\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"🎯 عدد ربات: <b>{picked_number}</b>\n📌 اعداد شما: <code>{picks_display}</code>\n"
-            f"💎 ضریب: {mult_display}\n\n🏆 برد: +<code>{format_number(prize)}</code>\n"
-            f"💰 موجودی: <code>{format_number(db.get_balance(user.id))}</code>"
-        )
-    else:
-        text = (
-            f"💔 <b>باختی!</b> 💔\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"🎯 عدد ربات: <b>{picked_number}</b>\n📌 اعداد شما: <code>{picks_display}</code>"
-        )
-
-    try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-    game['status'] = 'finished'
-    asyncio.create_task(cleanup_game_dict(guess_games, game_key, 30))
-
-
-async def guess_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_key = None
-    for k, g in list(guess_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-    if not game_key:
-        return
-    game = guess_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['amount'] > 0:
-        db.add_dark_points(user.id, game['amount'])
-    game['status'] = 'cancelled'
-    await query.edit_message_text(f"❌ لغو شد", parse_mode=ParseMode.HTML)
-    if game_key in guess_games:
-        del guess_games[game_key]
-
-
-# ============ CASINO ============
-
-casino_games = {}
-
-async def auto_cancel_casino(game_key, delay=GAME_TIMEOUT):
-    await asyncio.sleep(delay)
-    game = casino_games.get(game_key)
-    if game and game['status'] in ['picking', 'awaiting_bet']:
-        if game['amount'] > 0:
-            db.add_dark_points(game['user_id'], game['amount'])
-        game['status'] = 'auto_cancelled'
-        if game_key in casino_games:
-            del casino_games[game_key]
-
-
-async def handle_casino_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if db.get_setting('casino_active', '1') != '1':
-        await update.message.reply_text("❌ این بخش موقتاً غیرفعال می‌باشد.")
-        return
-
-    for k, g in list(casino_games.items()):
-        if g['user_id'] == user.id and g['status'] in ['awaiting_bet', 'picking']:
-            await update.message.reply_text("❌ شما یک کازینو باز دارید!")
-            return
-
-    balance = db.get_balance(user.id)
-    if balance < CASINO_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(CASINO_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return
-
-    msg = await update.message.reply_text(
-        f"🎰 ✨ <b>بازی کازینو</b> ✨ 🎰\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n\n"
-        f"💰 حداقل: <code>{format_number(CASINO_MIN_BET)}</code>\n\n"
-        f"📊 ضرایب:\n• 7️⃣: ۱۵x\n• 7️⃣+🍋: ۱۲x\n• 7️⃣+🍋+🍇: ۷x\n\n"
-        f"✏️ مبلغ شرط را ریپلای کن:",
-        parse_mode=ParseMode.HTML
-    )
-
-    game_key = f"casino_{user.id}_{msg.message_id}"
-    casino_games[game_key] = {
-        'user_id': user.id, 'user_obj': user, 'status': 'awaiting_bet',
-        'chat_id': msg.chat_id, 'message_id': msg.message_id,
-        'picks': [], 'amount': 0, 'created_at': time.time(),
-    }
-    asyncio.create_task(auto_cancel_casino(game_key))
-
-
-async def handle_casino_bet_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text.strip() if update.message.text else ""
-
-    if not update.message.reply_to_message:
-        return False
-
-    reply_msg_id = update.message.reply_to_message.message_id
-    game_key = None
-    for k, g in list(casino_games.items()):
-        if g['user_id'] == user.id and g['message_id'] == reply_msg_id and g['status'] == 'awaiting_bet':
-            game_key = k
-            break
-
-    if not game_key:
-        return False
-
-    try:
-        amount = int(text)
-    except Exception:
-        await update.message.reply_text("❌ عدد!")
-        return True
-
-    if amount < CASINO_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(CASINO_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return True
-
-    if db.get_balance(user.id) < amount:
-        await update.message.reply_text("❌ موجودی ناکافی!")
-        return True
-
-    db.remove_dark_points(user.id, amount)
-    game = casino_games[game_key]
-    game['amount'] = amount
-    game['status'] = 'picking'
-
-    kb = [
-        [InlineKeyboardButton("7️⃣ ۳ تا هفت", callback_data="casino_pick_7")],
-        [InlineKeyboardButton("🍋 ۳ تا لیمو", callback_data="casino_pick_lemon")],
-        [InlineKeyboardButton("🍇 ۳ تا انگور", callback_data="casino_pick_grape")],
-        [InlineKeyboardButton("🎰 چرخش!", callback_data="casino_spin")],
-        [InlineKeyboardButton("❌ لغو", callback_data="casino_cancel")],
-    ]
-
-    new_msg = await update.message.reply_text(
-        f"🎰 <b>کازینو</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-        f"📌 انتخابی: <code>هیچ</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-    game['message_id'] = new_msg.message_id
-    new_key = f"casino_{user.id}_{new_msg.message_id}"
-    casino_games[new_key] = casino_games.pop(game_key)
-    return True
-
-
-async def casino_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    picked = query.data.split("_")[-1]
-
-    game_key = None
-    for k, g in list(casino_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = casino_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['status'] != 'picking':
-        return
-
-    picks = game['picks']
-    if picked in picks:
-        picks.remove(picked)
-        await query.answer("❌ حذف")
-    else:
-        if len(picks) >= 3:
-            await query.answer("⚠️ حداکثر ۳!", show_alert=True)
-            return
-        picks.append(picked)
-        await query.answer("✅")
-
-    game['picks'] = picks
-    display_map = {'7': '7️⃣', 'lemon': '🍋', 'grape': '🍇'}
-    picks_display = " + ".join([display_map[p] for p in picks]) if picks else "هیچ"
-
-    if len(picks) == 1 and '7' in picks: mult_text = "۱۵ برابر 🥇"
-    elif len(picks) == 2 and set(picks) == {'7', 'lemon'}: mult_text = "۱۲ برابر 🥈"
-    elif len(picks) == 3 and set(picks) == {'7', 'lemon', 'grape'}: mult_text = "۷ برابر 🥉"
-    elif len(picks) == 0: mult_text = "بدون انتخاب"
-    else: mult_text = "❌ نامعتبر"
-
-    def get_btn(name, label):
-        emoji = {'7': '7️⃣', 'lemon': '🍋', 'grape': '🍇'}[name]
-        lbl = f"{emoji} {label}"
-        if name in picks: lbl = f"✅ {lbl}"
-        return InlineKeyboardButton(lbl, callback_data=f"casino_pick_{name}")
-
-    kb = [
-        [get_btn('7', '۳ تا هفت')],
-        [get_btn('lemon', '۳ تا لیمو')],
-        [get_btn('grape', '۳ تا انگور')],
-        [InlineKeyboardButton("🎰 چرخش!", callback_data="casino_spin")],
-        [InlineKeyboardButton("❌ لغو", callback_data="casino_cancel")],
-    ]
-
-    try:
-        await query.edit_message_text(
-            f"🎰 <b>کازینو</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-            f"📌 انتخابی: <code>{picks_display}</code>\n💎 ضریب: {mult_text}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    except Exception:
-        pass
-
-
-async def casino_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    game_key = None
-    for k, g in list(casino_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = casino_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['status'] != 'picking' or len(game['picks']) == 0:
-        await query.answer("⚠️ انتخاب کنید!", show_alert=True)
-        return
-
-    picks_set = set(game['picks'])
-    valid_combos = [{'7'}, {'7', 'lemon'}, {'7', 'lemon', 'grape'}]
-    if picks_set not in valid_combos:
-        await query.answer("❌ ترکیب نامعتبر!", show_alert=True)
-        return
-
-    game['status'] = 'rolling'
-    await query.answer("🎰 چرخش...")
-
-    casino_msg = await context.bot.send_dice(chat_id=game['chat_id'], emoji='🎰')
-    casino_value = casino_msg.dice.value
-    await asyncio.sleep(3)
-
-    winning_map = {1: 'bar', 22: 'grape', 43: 'lemon', 64: 'seven'}
-    result_symbol = winning_map.get(casino_value, None)
-    result_display = {'seven': '7️⃣ 7️⃣ 7️⃣', 'lemon': '🍋 🍋 🍋', 'grape': '🍇 🍇 🍇', 'bar': 'BAR BAR BAR', None: 'ترکیب مختلف'}
-    result_str = result_display.get(result_symbol, 'ترکیب مختلف')
-
-    won = False; multiplier = 0; mult_display = ""
-    picks = game['picks']; amount = game['amount']
-
-    if picks_set == {'7'} and result_symbol == 'seven':
-        won = True; multiplier = 15.0; mult_display = "۱۵ برابر"
-    elif picks_set == {'7', 'lemon'} and result_symbol in ['seven', 'lemon']:
-        won = True; multiplier = 12.0; mult_display = "۱۲ برابر"
-    elif picks_set == {'7', 'lemon', 'grape'} and result_symbol in ['seven', 'lemon', 'grape']:
-        won = True; multiplier = 7.0; mult_display = "۷ برابر"
-
-    display_map = {'7': '7️⃣', 'lemon': '🍋', 'grape': '🍇'}
-    picks_display = " + ".join([display_map[p] for p in picks])
-
-    if won:
-        prize = int(amount * multiplier)
-        db.add_dark_points(user.id, prize)
-        text = (
-            f"🎉 🎰 <b>جکپات!</b> 🎰 🎉\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"🎰 نتیجه: <b>{result_str}</b>\n📌 انتخاب: {picks_display}\n💎 ضریب: {mult_display}\n\n"
-            f"🏆 برد: +<code>{format_number(prize)}</code>\n💰 موجودی: <code>{format_number(db.get_balance(user.id))}</code>"
-        )
-    else:
-        text = (
-            f"💔 <b>باختی!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"🎰 نتیجه: {result_str}\n📌 انتخاب: {picks_display}"
-        )
-
-    try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-    game['status'] = 'finished'
-    asyncio.create_task(cleanup_game_dict(casino_games, game_key, 30))
-
-
-async def casino_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_key = None
-    for k, g in list(casino_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-    if not game_key:
-        return
-    game = casino_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['amount'] > 0:
-        db.add_dark_points(user.id, game['amount'])
-    game['status'] = 'cancelled'
-    await query.edit_message_text(f"❌ لغو شد", parse_mode=ParseMode.HTML)
-    if game_key in casino_games:
-        del casino_games[game_key]# ============ BOMB GAME (6 BOMBS - 0.4x PER SAFE) ============
-
-bomb_games = {}
-
-async def auto_cancel_bomb(game_key, delay=GAME_TIMEOUT):
-    await asyncio.sleep(delay)
-    game = bomb_games.get(game_key)
-    if game and game['status'] in ['playing', 'awaiting_bet']:
-        if len(game.get('revealed', [])) == 0 and game['amount'] > 0:
-            db.add_dark_points(game['user_id'], game['amount'])
-        game['status'] = 'auto_cancelled'
-        if game_key in bomb_games:
-            del bomb_games[game_key]
-
-
-async def handle_bomb_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if db.get_setting('bomb_active', '1') != '1':
-        await update.message.reply_text("❌ این بخش موقتاً غیرفعال می‌باشد.")
-        return
-
-    for k, g in list(bomb_games.items()):
-        if g['user_id'] == user.id and g['status'] in ['awaiting_bet', 'playing']:
-            await update.message.reply_text("❌ شما یک بمب باز دارید!")
-            return
-
-    balance = db.get_balance(user.id)
-    if balance < BOMB_MIN_BET:
-        await update.message.reply_text(
-            f"❌ حداقل: <code>{format_number(BOMB_MIN_BET)}</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    msg = await update.message.reply_text(
-        f"💣 ✨ <b>بازی بمب دارکی</b> ✨ 💣\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n\n"
-        f"🎯 <b>نحوه بازی:</b>\n"
-        f"• شبکه ۴×۴ (۱۶ خانه)\n"
-        f"• ۶ خانه بمب تصادفی 💣\n"
-        f"• هر خانه امن = <b>+۰.۴x ضریب</b>\n"
-        f"• بمب = <b>باخت کامل!</b>\n\n"
-        f"💰 حداقل: <code>{format_number(BOMB_MIN_BET)}</code>\n\n"
-        f"✏️ مبلغ شرط را ریپلای کن:",
-        parse_mode=ParseMode.HTML
-    )
-
-    game_key = f"bomb_{user.id}_{msg.message_id}"
-    bomb_games[game_key] = {
-        'user_id': user.id, 'user_obj': user, 'status': 'awaiting_bet',
-        'chat_id': msg.chat_id, 'message_id': msg.message_id,
-        'amount': 0, 'bombs': [], 'revealed': [], 'multiplier': 1.0,
-        'created_at': time.time(),
-    }
-    asyncio.create_task(auto_cancel_bomb(game_key))
-
-
-async def handle_bomb_bet_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text.strip() if update.message.text else ""
-
-    if not update.message.reply_to_message:
-        return False
-
-    reply_msg_id = update.message.reply_to_message.message_id
-    game_key = None
-    for k, g in list(bomb_games.items()):
-        if g['user_id'] == user.id and g['message_id'] == reply_msg_id and g['status'] == 'awaiting_bet':
-            game_key = k
-            break
-
-    if not game_key:
-        return False
-
-    try:
-        amount = int(text)
-    except Exception:
-        await update.message.reply_text("❌ عدد!")
-        return True
-
-    if amount < BOMB_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(BOMB_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return True
-
-    if db.get_balance(user.id) < amount:
-        await update.message.reply_text("❌ موجودی ناکافی!")
-        return True
-
-    db.remove_dark_points(user.id, amount)
-    game = bomb_games[game_key]
-    game['amount'] = amount
-    game['status'] = 'playing'
-    game['multiplier'] = 1.0
-
-    all_positions = list(range(16))
-    bomb_positions = random.sample(all_positions, BOMB_COUNT)
-    game['bombs'] = bomb_positions
-    game['revealed'] = []
-
-    kb = generate_bomb_keyboard(game)
-    new_msg = await update.message.reply_text(
-        f"💣 <b>بازی بمب فعال!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-        f"💎 ضریب: <b>1.0x</b>\n🏆 برد فعلی: <code>{format_number(amount)}</code>\n"
-        f"💣 بمب‌ها: <b>{BOMB_COUNT}</b> از ۱۶\n\n"
-        f"⚡️ هر خانه امن = +۰.۴ ضریب",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-    game['message_id'] = new_msg.message_id
-    new_key = f"bomb_{user.id}_{new_msg.message_id}"
-    bomb_games[new_key] = bomb_games.pop(game_key)
-    return True
-
-
-def generate_bomb_keyboard(game):
-    revealed = game['revealed']
-    bombs = game['bombs']
-    status = game['status']
-
-    kb = []
-    for row in range(4):
-        row_buttons = []
-        for col in range(4):
-            pos = row * 4 + col
-            if status in ['won', 'lost', 'cashed_out', 'auto_cancelled']:
-                if pos in bombs:
-                    label = "💣"
-                elif pos in revealed:
-                    label = "💎"
-                else:
-                    label = "⬜"
-            else:
-                if pos in revealed:
-                    label = "💎"
-                else:
-                    label = "🎁"
-            row_buttons.append(InlineKeyboardButton(label, callback_data=f"bomb_click_{pos}"))
-        kb.append(row_buttons)
-
-    if status == 'playing' and len(game['revealed']) > 0:
-        kb.append([InlineKeyboardButton(f"💰 برداشت ({game['multiplier']:.1f}x)", callback_data="bomb_cashout")])
-
-    if status == 'playing' and len(game['revealed']) == 0:
-        kb.append([InlineKeyboardButton("❌ لغو", callback_data="bomb_cancel")])
-
-    return kb
-
-
-async def bomb_click_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    pos = int(query.data.split("_")[-1])
-
-    game_key = None
-    for k, g in list(bomb_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = bomb_games[game_key]
-    if game['user_id'] != user.id:
-        await query.answer("❌ این بازی شما نیست!", show_alert=True)
-        return
-    if game['status'] != 'playing':
-        return
-    if pos in game['revealed']:
-        await query.answer("❌ قبلاً باز!", show_alert=True)
-        return
-
-    if pos in game['bombs']:
-        game['status'] = 'lost'
-        await query.answer("💥 بوم! بمب!", show_alert=True)
-
-        kb = generate_bomb_keyboard(game)
-        await query.edit_message_text(
-            f"💥💥💥 <b>منفجر شد!</b> 💥💥💥\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-            f"💣 روی بمب کلیک کردی!\n💔 نتیجه: <b>باخت کامل!</b>\n\n"
-            f"💎 موجودی: <code>{format_number(db.get_balance(user.id))}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-        asyncio.create_task(cleanup_game_dict(bomb_games, game_key, 30))
-        return
-
-    game['revealed'].append(pos)
-    game['multiplier'] = round(1.0 + (len(game['revealed']) * BOMB_MULTIPLIER_STEP), 2)
-    potential_win = int(game['amount'] * game['multiplier'])
-
-    await query.answer(f"✅ +{game['multiplier']}x!")
-
-    safe_count = 16 - BOMB_COUNT
-    if len(game['revealed']) == safe_count:
-        game['status'] = 'won'
-        prize = potential_win
-        db.add_dark_points(user.id, prize)
-        kb = generate_bomb_keyboard(game)
-        await query.edit_message_text(
-            f"🏆 🎊 <b>جکپات کامل!</b> 🎊 🏆\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-            f"💎 ضریب: <b>{game['multiplier']}x</b>\n🏆 برد: <code>{format_number(prize)}</code>\n\n"
-            f"💰 موجودی: <code>{format_number(db.get_balance(user.id))}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-        asyncio.create_task(cleanup_game_dict(bomb_games, game_key, 30))
-        return
-
-    kb = generate_bomb_keyboard(game)
-    try:
-        await query.edit_message_text(
-            f"💣 <b>بازی بمب فعال</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-            f"💎 ضریب: <b>{game['multiplier']}x</b>\n🏆 برد: <code>{format_number(potential_win)}</code>\n"
-            f"🎁 خانه‌ها: {len(game['revealed'])}/{safe_count}\n💣 بمب: {BOMB_COUNT}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    except Exception:
-        pass
-
-
-async def bomb_cashout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    game_key = None
-    for k, g in list(bomb_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = bomb_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['status'] != 'playing' or len(game['revealed']) == 0:
-        await query.answer("❌ حداقل یک خانه باز کن!", show_alert=True)
-        return
-
-    prize = int(game['amount'] * game['multiplier'])
-    profit = prize - game['amount']
-    db.add_dark_points(user.id, prize)
-    game['status'] = 'cashed_out'
-
-    await query.answer(f"✅ +{format_number(prize)} DP", show_alert=True)
-
-    kb = generate_bomb_keyboard(game)
-    await query.edit_message_text(
-        f"🎉 💰 <b>برداشت موفق!</b> 💰 🎉\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-        f"💎 ضریب: <b>{game['multiplier']}x</b>\n🏆 برد: <code>{format_number(prize)}</code>\n"
-        f"📈 سود: +<code>{format_number(profit)}</code>\n\n"
-        f"💰 موجودی: <code>{format_number(db.get_balance(user.id))}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-    asyncio.create_task(cleanup_game_dict(bomb_games, game_key, 30))
-
-
-async def bomb_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_key = None
-    for k, g in list(bomb_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-    if not game_key:
-        return
-    game = bomb_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['status'] != 'playing' or len(game['revealed']) > 0:
-        await query.answer("❌ قابل لغو نیست!", show_alert=True)
-        return
-    db.add_dark_points(user.id, game['amount'])
-    game['status'] = 'cancelled'
-    await query.edit_message_text(f"❌ لغو شد\n💰 <code>{format_number(game['amount'])}</code> بازگردانده شد", parse_mode=ParseMode.HTML)
-    if game_key in bomb_games:
-        del bomb_games[game_key]
-
-
-# ============ FOOTBALL GAME ============
-
-football_games = {}
-
-async def auto_cancel_football(game_key, delay=GAME_TIMEOUT):
-    await asyncio.sleep(delay)
-    game = football_games.get(game_key)
-    if game and game['status'] in ['picking', 'awaiting_bet']:
-        if game['amount'] > 0:
-            db.add_dark_points(game['user_id'], game['amount'])
-        game['status'] = 'auto_cancelled'
-        if game_key in football_games:
-            del football_games[game_key]
-
-
-async def handle_football_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if db.get_setting('football_active', '1') != '1':
-        await update.message.reply_text("❌ این بخش موقتاً غیرفعال می‌باشد.")
-        return
-
-    for k, g in list(football_games.items()):
-        if g['user_id'] == user.id and g['status'] in ['awaiting_bet', 'picking']:
-            await update.message.reply_text("❌ شما یک فوتبال باز دارید!")
-            return
-
-    balance = db.get_balance(user.id)
-    if balance < FOOTBALL_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(FOOTBALL_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return
-
-    msg = await update.message.reply_text(
-        f"⚽ ✨ <b>بازی فوتبال دارکی</b> ✨ ⚽\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n\n"
-        f"🎯 حدس بزن توپ کجا میره!\n"
-        f"💰 حداقل: <code>{format_number(FOOTBALL_MIN_BET)}</code>\n\n"
-        f"📊 ضرایب:\n• تیرک: <b>۱۲x</b> 🥇\n• تیرک+بیرون: <b>۷x</b> 🥈\n"
-        f"• گل+تیرک+بیرون: <b>۳x</b> 🥉\n\n"
-        f"✏️ مبلغ شرط را ریپلای کن:",
-        parse_mode=ParseMode.HTML
-    )
-
-    game_key = f"football_{user.id}_{msg.message_id}"
-    football_games[game_key] = {
-        'user_id': user.id, 'user_obj': user, 'status': 'awaiting_bet',
-        'chat_id': msg.chat_id, 'message_id': msg.message_id,
-        'picks': [], 'amount': 0, 'created_at': time.time(),
-    }
-    asyncio.create_task(auto_cancel_football(game_key))
-
-
-async def handle_football_bet_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text.strip() if update.message.text else ""
-
-    if not update.message.reply_to_message:
-        return False
-
-    reply_msg_id = update.message.reply_to_message.message_id
-    game_key = None
-    for k, g in list(football_games.items()):
-        if g['user_id'] == user.id and g['message_id'] == reply_msg_id and g['status'] == 'awaiting_bet':
-            game_key = k
-            break
-
-    if not game_key:
-        return False
-
-    try:
-        amount = int(text)
-    except Exception:
-        await update.message.reply_text("❌ عدد!")
-        return True
-
-    if amount < FOOTBALL_MIN_BET:
-        await update.message.reply_text(f"❌ حداقل: <code>{format_number(FOOTBALL_MIN_BET)}</code>", parse_mode=ParseMode.HTML)
-        return True
-
-    if db.get_balance(user.id) < amount:
-        await update.message.reply_text("❌ موجودی ناکافی!")
-        return True
-
-    db.remove_dark_points(user.id, amount)
-    game = football_games[game_key]
-    game['amount'] = amount
-    game['status'] = 'picking'
-
-    kb = [
-        [InlineKeyboardButton("🥅 گل زدن", callback_data="football_pick_goal")],
-        [InlineKeyboardButton("🎯 تیرک", callback_data="football_pick_bar")],
-        [InlineKeyboardButton("💨 بیرون", callback_data="football_pick_out")],
-        [InlineKeyboardButton("⚽ شوت!", callback_data="football_shoot")],
-        [InlineKeyboardButton("❌ لغو", callback_data="football_cancel")],
-    ]
-
-    new_msg = await update.message.reply_text(
-        f"⚽ <b>فوتبال</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-        f"📌 انتخابی: <code>هیچ</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-    game['message_id'] = new_msg.message_id
-    new_key = f"football_{user.id}_{new_msg.message_id}"
-    football_games[new_key] = football_games.pop(game_key)
-    return True
-
-
-async def football_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    picked = query.data.split("_")[-1]
-
-    game_key = None
-    for k, g in list(football_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = football_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['status'] != 'picking':
-        return
-
-    picks = game['picks']
-    if picked in picks:
-        picks.remove(picked)
-        await query.answer("❌ حذف")
-    else:
-        if len(picks) >= 3:
-            await query.answer("⚠️ حداکثر ۳!", show_alert=True)
-            return
-        picks.append(picked)
-        await query.answer("✅")
-
-    game['picks'] = picks
-    display_map = {'goal': '🥅 گل', 'bar': '🎯 تیرک', 'out': '💨 بیرون'}
-    picks_display = " + ".join([display_map[p] for p in picks]) if picks else "هیچ"
-
-    picks_set = set(picks)
-    if picks_set == {'bar'}: mult_text = "۱۲ برابر 🥇"
-    elif picks_set == {'bar', 'out'}: mult_text = "۷ برابر 🥈"
-    elif picks_set == {'goal', 'bar', 'out'}: mult_text = "۳ برابر 🥉"
-    elif len(picks) == 0: mult_text = "بدون انتخاب"
-    else: mult_text = "❌ نامعتبر"
-
-    def get_btn(name, label):
-        emoji = {'goal': '🥅', 'bar': '🎯', 'out': '💨'}[name]
-        lbl = f"{emoji} {label}"
-        if name in picks: lbl = f"✅ {lbl}"
-        return InlineKeyboardButton(lbl, callback_data=f"football_pick_{name}")
-
-    kb = [
-        [get_btn('goal', 'گل')],
-        [get_btn('bar', 'تیرک')],
-        [get_btn('out', 'بیرون')],
-        [InlineKeyboardButton("⚽ شوت!", callback_data="football_shoot")],
-        [InlineKeyboardButton("❌ لغو", callback_data="football_cancel")],
-    ]
-
-    try:
-        await query.edit_message_text(
-            f"⚽ <b>فوتبال</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(game['amount'])}</code>\n\n"
-            f"📌 انتخابی: <code>{picks_display}</code>\n💎 ضریب: {mult_text}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-    except Exception:
-        pass
-
-
-async def football_shoot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    game_key = None
-    for k, g in list(football_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-
-    if not game_key:
-        return
-
-    game = football_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['status'] != 'picking' or len(game['picks']) == 0:
-        await query.answer("⚠️ انتخاب کنید!", show_alert=True)
-        return
-
-    picks_set = set(game['picks'])
-    valid_combos = [{'bar'}, {'bar', 'out'}, {'goal', 'bar', 'out'}]
-    if picks_set not in valid_combos:
-        await query.answer("❌ ترکیب نامعتبر!", show_alert=True)
-        return
-
-    game['status'] = 'shooting'
-    await query.answer("⚽ شوت...")
-
-    football_msg = await context.bot.send_dice(chat_id=game['chat_id'], emoji='⚽')
-    football_value = football_msg.dice.value
-    result_map = {1: 'out', 2: 'bar', 3: 'goal', 4: 'out', 5: 'goal'}
-    result = result_map.get(football_value, 'out')
-    await asyncio.sleep(4)
-
-    picks = game['picks']
-    amount = game['amount']
-    won = result in picks
-
-    if picks_set == {'bar'}: multiplier = 12.0; mult_display = "۱۲ برابر"
-    elif picks_set == {'bar', 'out'}: multiplier = 7.0; mult_display = "۷ برابر"
-    else: multiplier = 3.0; mult_display = "۳ برابر"
-
-    display_map = {'goal': '🥅 گل', 'bar': '🎯 تیرک', 'out': '💨 بیرون'}
-    picks_display = " + ".join([display_map[p] for p in picks])
-    result_display = display_map.get(result, 'نامشخص')
-
-    if won:
-        prize = int(amount * multiplier)
-        db.add_dark_points(user.id, prize)
-        text = (
-            f"🎉 ⚽ <b>گل! برنده شدی!</b> ⚽ 🎉\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"⚽ نتیجه: <b>{result_display}</b>\n📌 انتخاب: {picks_display}\n"
-            f"💎 ضریب: {mult_display}\n\n🏆 برد: +<code>{format_number(prize)}</code>\n"
-            f"💰 موجودی: <code>{format_number(db.get_balance(user.id))}</code>"
-        )
-    else:
-        text = (
-            f"💔 <b>باختی!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 {get_user_display(user)}\n💰 شرط: <code>{format_number(amount)}</code>\n\n"
-            f"⚽ نتیجه: <b>{result_display}</b>\n📌 انتخاب: {picks_display}"
-        )
-
-    try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-    game['status'] = 'finished'
-    asyncio.create_task(cleanup_game_dict(football_games, game_key, 30))
-
-
-async def football_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    game_key = None
-    for k, g in list(football_games.items()):
-        if g['message_id'] == query.message.message_id and g['chat_id'] == query.message.chat_id:
-            game_key = k
-            break
-    if not game_key:
-        return
-    game = football_games[game_key]
-    if game['user_id'] != user.id:
-        return
-    if game['amount'] > 0:
-        db.add_dark_points(user.id, game['amount'])
-    game['status'] = 'cancelled'
-    await query.edit_message_text(f"❌ لغو شد", parse_mode=ParseMode.HTML)
-    if game_key in football_games:
-        del football_games[game_key]
-
-
-# ============ HANDLE GROUP REPLY FOR GAMES ============
-
-async def handle_group_reply_for_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ریپلای در گروه برای شرط بازی‌ها"""
-    handled = await handle_guess_bet_reply(update, context)
-    if handled: return True
-
-    handled = await handle_casino_bet_reply(update, context)
-    if handled: return True
-
-    handled = await handle_bomb_bet_reply(update, context)
-    if handled: return True
-
-    handled = await handle_football_bet_reply(update, context)
-    if handled: return True
-
-    handled = await handle_miner_charge_reply(update, context)
-    if handled: return True
-
-    return False# ============ ADMIN PANEL ============
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("❌ شما ادمین نیستید!")
-        return
-
-    stats = db.get_stats()
-
-    bot_active_status = "🟢" if db.get_setting('bot_active', '1') == '1' else "🔴"
-    gift_status = "🟢" if db.get_setting('gift_section_active', '1') == '1' else "🔴"
-    stars_status = "🟢" if db.get_setting('stars_section_active', '1') == '1' else "🔴"
-    buydp_status = "🟢" if db.get_setting('buy_dp_active', '1') == '1' else "🔴"
-    buypanel_status = "🟢" if db.get_setting('buy_panel_active', '1') == '1' else "🔴"
-    crash_status = "🟢" if db.get_setting('crash_active', '1') == '1' else "🔴"
-    dice_status = "🟢" if db.get_setting('dice_active', '1') == '1' else "🔴"
-    guess_status = "🟢" if db.get_setting('guess_active', '1') == '1' else "🔴"
-    casino_status = "🟢" if db.get_setting('casino_active', '1') == '1' else "🔴"
-    bomb_status = "🟢" if db.get_setting('bomb_active', '1') == '1' else "🔴"
-    football_status = "🟢" if db.get_setting('football_active', '1') == '1' else "🔴"
-    wheel_status = "🟢" if db.get_setting('wheel_active', '1') == '1' else "🔴"
-    tasks_status = "🟢" if db.get_setting('tasks_active', '1') == '1' else "🔴"
-    miner_status = "🟢" if db.get_setting('miner_active', '1') == '1' else "🔴"
-    shop_status = "🟢" if db.get_setting('shop_active', '1') == '1' else "🔴"
-    convert_status = "🟢" if db.get_setting('convert_active', '1') == '1' else "🔴"
-
-    kb = [
-        [InlineKeyboardButton(f"⚡️ وضعیت ربات: {bot_active_status}", callback_data="adm_toggle_bot")],
-        [InlineKeyboardButton("📊 آمار کامل ربات", callback_data="adm_stats")],
-        [InlineKeyboardButton("💱 آمار ارزها و تبدیل", callback_data="adm_mining_stats")],
-        [
-            InlineKeyboardButton("📢 پیام همگانی", callback_data="adm_broadcast_msg"),
-            InlineKeyboardButton("📤 فوروارد همگانی", callback_data="adm_broadcast_fwd"),
-        ],
-        [InlineKeyboardButton("📣 ارسال تبلیغ به گروه‌ها", callback_data="adm_broadcast_groups")],
-        [InlineKeyboardButton("📋 لیست گروه‌های ادمین", callback_data="adm_list_groups")],
-        [
-            InlineKeyboardButton("💰 افزودن DP", callback_data="adm_add_dp"),
-            InlineKeyboardButton("💸 کسر DP", callback_data="adm_remove_dp"),
-        ],
-        [
-            InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="adm_search_user"),
-            InlineKeyboardButton("🚫 بن/آنبن", callback_data="adm_ban_user"),
-        ],
-        [InlineKeyboardButton("📢 مدیریت کانال‌های اجباری", callback_data="adm_channels")],
-        [InlineKeyboardButton("📋 مدیریت تسک‌ها", callback_data="adm_tasks")],
-        [InlineKeyboardButton("🎖 درخواست‌های ماموریت", callback_data="adm_mission_requests")],
-        [InlineKeyboardButton("🛍 مدیریت فروشگاه", callback_data="adm_shop")],
-        [
-            InlineKeyboardButton("👥 پاداش رفرال", callback_data="adm_ref_reward"),
-            InlineKeyboardButton("🎁 هدیه ثبت‌نام", callback_data="adm_first_reward"),
-        ],
-        [
-            InlineKeyboardButton("💵 قیمت پنل سنایی", callback_data="adm_panel_prices"),
-            InlineKeyboardButton("📦 افزودن پلن پنل", callback_data="adm_create_panel"),
-        ],
-        [InlineKeyboardButton("🗑 حذف پلن پنل", callback_data="adm_delete_panel")],
-        [
-            InlineKeyboardButton("💵 قیمت گیفت", callback_data="adm_set_gift_price"),
-            InlineKeyboardButton("⭐ قیمت استارز", callback_data="adm_set_stars_price"),
-        ],
-        [InlineKeyboardButton("🎁 افزودن پلن گیفت", callback_data="adm_add_gift_plan")],
-        [
-            InlineKeyboardButton("💾 بکاپ کامل", callback_data="adm_backup_db"),
-            InlineKeyboardButton("🔄 بازگردانی بکاپ", callback_data="adm_restore_db"),
-        ],
-        [
-            InlineKeyboardButton(f"🛒 خرید پنل: {buypanel_status}", callback_data="adm_toggle_buypanel"),
-            InlineKeyboardButton(f"🎁 گیفت: {gift_status}", callback_data="adm_toggle_gift"),
-        ],
-        [
-            InlineKeyboardButton(f"⭐ استارز: {stars_status}", callback_data="adm_toggle_stars"),
-            InlineKeyboardButton(f"💰 خرید DP: {buydp_status}", callback_data="adm_toggle_buydp"),
-        ],
-        [
-            InlineKeyboardButton(f"💱 تبدیل: {convert_status}", callback_data="adm_toggle_convert"),
-            InlineKeyboardButton(f"🛍 فروشگاه: {shop_status}", callback_data="adm_toggle_shop"),
-        ],
-        [
-            InlineKeyboardButton(f"⚒ ماینر: {miner_status}", callback_data="adm_toggle_miner"),
-            InlineKeyboardButton(f"💥 انفجار: {crash_status}", callback_data="adm_toggle_crash"),
-        ],
-        [
-            InlineKeyboardButton(f"🎲 تاس: {dice_status}", callback_data="adm_toggle_dice"),
-            InlineKeyboardButton(f"🎯 حدس بزن: {guess_status}", callback_data="adm_toggle_guess"),
-        ],
-        [
-            InlineKeyboardButton(f"🎰 کازینو: {casino_status}", callback_data="adm_toggle_casino"),
-            InlineKeyboardButton(f"💣 بمب: {bomb_status}", callback_data="adm_toggle_bomb"),
-        ],
-        [
-            InlineKeyboardButton(f"⚽ فوتبال: {football_status}", callback_data="adm_toggle_football"),
-            InlineKeyboardButton(f"🎡 گردونه: {wheel_status}", callback_data="adm_toggle_wheel"),
-        ],
-        [InlineKeyboardButton(f"📋 تسک‌ها: {tasks_status}", callback_data="adm_toggle_tasks")],
-        [InlineKeyboardButton("💬 ارسال به کاربر خاص", callback_data="adm_send_to_user")],
-        [InlineKeyboardButton("📋 آخرین سفارشات", callback_data="adm_recent_orders")],
-        [InlineKeyboardButton("🎁 هدیه به برترین‌ها", callback_data="adm_gift_top")],
-        [InlineKeyboardButton("📝 ساخت چک شخصی", callback_data="adm_create_check")],
-        [InlineKeyboardButton("🎁 هدیه به همه", callback_data="adm_gift_all")],
-        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="main_menu")],
-    ]
-
-    text = (
-        f"🛡 <b>پنل مدیریت ادمین</b> 🛡\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"⚡️ وضعیت ربات: {bot_active_status}\n"
-        f"👥 کل کاربران: <b>{stats['total_users']}</b>\n"
-        f"✅ فعال ۷ روز: <b>{stats['active_7d']}</b>\n"
-        f"🆕 جدید امروز: <b>{stats['new_today']}</b>\n"
-        f"🚫 بن شده: <b>{stats['banned_users']}</b>\n"
-        f"💎 کل DP: <code>{format_number(stats['total_dp'])}</code>\n"
-        f"🏦 کل بانک: <code>{format_number(stats['total_bank'])}</code>\n"
-        f"📣 گروه‌های ادمین: <b>{stats['admin_groups']}</b>"
-    )
-
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def admin_stats_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    stats = db.get_stats()
-    text = (
-        f"📊 <b>آمار کامل ربات</b> 📊\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 <b>کاربران:</b>\n"
-        f"   • کل: {stats['total_users']}\n"
-        f"   • فعال ۷ روزه: {stats['active_7d']}\n"
-        f"   • جدید امروز: {stats['new_today']}\n"
-        f"   • بن شده: {stats['banned_users']}\n\n"
-        f"💰 <b>مالی:</b>\n"
-        f"   • کل DP: <code>{format_number(stats['total_dp'])}</code>\n"
-        f"   • کل بانک: <code>{format_number(stats['total_bank'])}</code>\n\n"
-        f"📦 <b>سفارشات:</b>\n"
-        f"   • پنل: {stats['panel_orders']}\n"
-        f"   • گیفت: {stats['gift_orders']}\n"
-        f"   • استارز: {stats['stars_orders']}\n"
-        f"   • فروشگاه: {stats['shop_orders']}\n\n"
-        f"💥 <b>بازی انفجار:</b>\n"
-        f"   • برد: {stats['crash_won']}\n"
-        f"   • باخت: {stats['crash_lost']}\n\n"
-        f"📣 <b>گروه‌ها:</b>\n"
-        f"   • کل: {stats['total_groups']}\n"
-        f"   • ادمین: {stats['admin_groups']}"
-    )
-    kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_mining_stats_cb(update, context):
-    """آمار ماینر و ارزها"""
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    mstats = db.get_total_mining_stats()
-    text = (
-        f"💱 <b>آمار ماینر و ارزها</b> 💱\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"⚒ <b>ماینرها:</b>\n"
-        f"   • کل: <b>{mstats['total_miners']}</b>\n"
-        f"   • فعال: <b>{mstats['active_miners']}</b>\n\n"
-        f"🪙 <b>TON:</b>\n"
-        f"   • کل ماین شده: <code>{format_crypto(mstats['total_ton_all'], 4)}</code>\n"
-        f"   • موجود در حساب‌ها: <code>{format_crypto(mstats['total_ton_current'], 4)}</code>\n"
-        f"   • تبدیل شده به DP: <code>{format_crypto(mstats['total_ton_converted'], 4)}</code>\n\n"
-        f"💵 <b>USDT:</b>\n"
-        f"   • کل ماین شده: <code>{format_crypto(mstats['total_usdt_all'], 4)}</code>\n"
-        f"   • موجود در حساب‌ها: <code>{format_crypto(mstats['total_usdt_current'], 4)}</code>\n"
-        f"   • تبدیل شده به DP: <code>{format_crypto(mstats['total_usdt_converted'], 4)}</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📊 معادل DP تبدیل شده:\n"
-        f"   • از TON: <code>{format_number(int(mstats['total_ton_converted'] / 0.01 * TON_TO_DP_RATE))}</code>\n"
-        f"   • از USDT: <code>{format_number(int(mstats['total_usdt_converted'] / 0.01 * USDT_TO_DP_RATE))}</code>"
-    )
-    kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_toggle_bot_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    cur = db.get_setting('bot_active', '1')
-    new = '0' if cur == '1' else '1'
-    db.set_setting('bot_active', new)
-    status = "✅ روشن" if new == '1' else "⚠️ خاموش"
-    await query.answer(f"ربات {status}", show_alert=True)
-    await admin_panel(update, context)
-
-
-# ============ BROADCAST ============
-
-async def adm_broadcast_msg_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'broadcast_msg'
-    await query.edit_message_text(
-        "📢 <b>پیام همگانی</b>\n\nپیام را ارسال کنید (هر نوع).\n\nبرای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def adm_broadcast_fwd_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'broadcast_fwd'
-    await query.edit_message_text(
-        "📤 <b>فوروارد همگانی</b>\n\nپیام را بفرستید.\n\nبرای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def adm_broadcast_groups_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'broadcast_groups'
-    groups = db.get_admin_groups()
-    await query.edit_message_text(
-        f"📣 <b>ارسال تبلیغ به گروه‌ها</b>\n\n📊 گروه‌های ادمین: <b>{len(groups)}</b>\n\nپیام تبلیغاتی را ارسال کنید.\n\nبرای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def do_broadcast(update, context, mode='copy'):
-    admin_id = update.effective_user.id
-    users = db.get_all_user_ids()
-    total = len(users)
-    sent, failed, blocked = 0, 0, 0
-    start_time = time.time()
-
-    status_msg = await update.message.reply_text(
-        f"⏳ در حال ارسال به <b>{total}</b> کاربر...",
-        parse_mode=ParseMode.HTML
-    )
-
-    for uid in users:
-        try:
-            if mode == 'copy':
-                await context.bot.copy_message(chat_id=uid, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
-            else:
-                await context.bot.forward_message(chat_id=uid, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
-            sent += 1
-        except Exception as e:
-            err_str = str(e).lower()
-            if 'blocked' in err_str or 'kicked' in err_str or 'deactivated' in err_str:
-                blocked += 1
-            failed += 1
-
-        if (sent + failed) % 20 == 0:
-            try:
-                await status_msg.edit_text(
-                    f"⏳ در حال ارسال...\n✅ موفق: <b>{sent}</b>\n❌ ناموفق: <b>{failed}</b>\n📊 {sent+failed}/{total}",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-        await asyncio.sleep(0.05)
-
-    db.log_broadcast(admin_id, mode, total, sent, failed)
-    total_time = int(time.time() - start_time)
-    success_rate = int(sent/total*100 if total else 0)
-
-    await status_msg.edit_text(
-        f"✅ <b>ارسال کامل شد!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 کل: <b>{total}</b>\n✅ موفق: <b>{sent}</b>\n❌ ناموفق: <b>{failed}</b>\n"
-        f"🚫 بلاک: <b>{blocked}</b>\n📈 موفقیت: <b>{success_rate}%</b>\n⏱ زمان: <b>{total_time}s</b>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def do_broadcast_groups(update, context):
-    admin_id = update.effective_user.id
-    groups = db.get_admin_groups()
-    total = len(groups)
-    sent, failed = 0, 0
-    start_time = time.time()
-
-    status_msg = await update.message.reply_text(
-        f"⏳ در حال ارسال به <b>{total}</b> گروه...",
-        parse_mode=ParseMode.HTML
-    )
-
-    for g in groups:
-        try:
-            await context.bot.copy_message(chat_id=g['chat_id'], from_chat_id=update.message.chat_id, message_id=update.message.message_id)
-            sent += 1
-        except Exception:
-            failed += 1
-        
-        if (sent + failed) % 10 == 0:
-            try:
-                await status_msg.edit_text(f"⏳ در حال ارسال...\n✅ {sent}\n❌ {failed}\n📊 {sent+failed}/{total}", parse_mode=ParseMode.HTML)
-            except Exception:
-                pass
-        await asyncio.sleep(0.3)
-
-    total_time = int(time.time() - start_time)
-    success_rate = int(sent/total*100 if total else 0)
-    await status_msg.edit_text(
-        f"✅ <b>ارسال به گروه‌ها کامل شد!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"📣 کل: <b>{total}</b>\n✅ موفق: <b>{sent}</b>\n❌ ناموفق: <b>{failed}</b>\n"
-        f"📈 موفقیت: <b>{success_rate}%</b>\n⏱ زمان: <b>{total_time}s</b>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# ============ LIST GROUPS ============
-
-async def adm_list_groups_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    groups = db.get_all_groups()
-    text = "📣 <b>لیست گروه‌های ربات</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    if not groups:
-        text += "❌ هیچ گروهی ثبت نشده"
-    else:
-        for g in groups[:30]:
-            title = html.escape(g['title'] or "بدون عنوان")
-            admin_mark = "👑" if g['is_admin'] else "❌"
-            text += f"{admin_mark} <b>{title}</b>\n   🆔 <code>{g['chat_id']}</code> | 👥 {g['member_count']}\n\n"
-        if len(groups) > 30:
-            text += f"\n<i>... و {len(groups) - 30} گروه دیگر</i>"
-    text += "\n━━━━━━━━━━━━━━━━━━\n👑 ادمین | ❌ عضو عادی"
-
-    kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-# ============ CHANNELS ============
-
-async def adm_channels_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    channels = db.get_force_channels()
-    text = "📢 <b>کانال‌های اجباری</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    if not channels:
-        text += "❌ هیچ کانالی ثبت نشده"
-    else:
-        for ch in channels:
-            title = html.escape(ch['channel_title'] or "")
-            text += f"• {ch['channel_username']} ({title})\n"
-
-    kb = [[InlineKeyboardButton("➕ افزودن کانال", callback_data="adm_add_channel")]]
-    for ch in channels:
-        kb.append([InlineKeyboardButton(f"🗑 حذف {ch['channel_username']}", callback_data=f"adm_del_ch_{ch['channel_id']}")])
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_add_channel_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'add_channel'
-    await query.edit_message_text(
-        "➕ یوزرنیم کانال را با @ بفرست:\n⚠️ ربات باید ادمین کانال باشد\n\nبرای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def adm_del_ch_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    channel_id = int(query.data.split("_")[-1])
-    db.remove_force_channel(channel_id)
-    await query.answer("✅ حذف شد", show_alert=True)
-    await adm_channels_cb(update, context)
+    # Register user if not exists
+    db.create_user(uid, update.effective_user.username or "",
+                   update.effective_user.first_name or "")
 
-
-# ============ TASKS MANAGEMENT ============
-
-async def adm_tasks_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    tasks = db.get_tasks(only_active=False)
-    text = "📋 <b>مدیریت تسک‌ها</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    if not tasks:
-        text += "❌ هیچ تسکی موجود نیست"
-    else:
-        for t in tasks:
-            title = html.escape(t['channel_title'] or "")
-            task_type_emoji = "📢" if t['task_type'] == 'channel' else "🎖"
-            cap_text = ""
-            if t['capacity'] > 0:
-                cap_text = f" | {t['completed_count']}/{t['capacity']}"
-            text += f"{task_type_emoji} #{t['task_id']} - {title}\n  💰 {format_number(t['reward'])}{cap_text}\n\n"
-
-    kb = [
-        [InlineKeyboardButton("➕ تسک عضویت کانال", callback_data="adm_add_task_channel")],
-        [InlineKeyboardButton("➕ تسک ماموریت", callback_data="adm_add_task_mission")],
-    ]
-    for t in tasks:
-        title = html.escape(t['channel_title'] or "")[:20]
-        kb.append([InlineKeyboardButton(f"🗑 حذف #{t['task_id']} - {title}", callback_data=f"adm_del_task_{t['task_id']}")])
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_add_task_channel_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'add_task_channel'
-    context.user_data['task_step'] = 'channel'
-    await query.edit_message_text(
-        "📢 <b>افزودن تسک عضویت</b>\n\nیوزرنیم کانال با @:\n⚠️ ربات باید ادمین کانال باشد",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def adm_add_task_mission_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'add_task_mission'
-    context.user_data['task_step'] = 'title'
-    await query.edit_message_text(
-        "🎖 <b>افزودن تسک ماموریت</b>\n\nعنوان ماموریت:",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def adm_del_task_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    task_id = int(query.data.split("_")[-1])
-    db.delete_task(task_id)
-    await query.answer("✅ حذف شد", show_alert=True)
-    await adm_tasks_cb(update, context)
-
-
-# ============ MISSION REQUESTS ============
-
-async def adm_mission_requests_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    conn = db.get_conn()
-    c = conn.cursor()
-    c.execute("""SELECT mr.*, t.channel_title as task_title, t.reward 
-                 FROM mission_requests mr 
-                 JOIN tasks t ON mr.task_id = t.task_id 
-                 WHERE mr.status = 'pending' 
-                 ORDER BY mr.created_at DESC LIMIT 20""")
-    requests = c.fetchall()
-    conn.close()
-
-    text = "🎖 <b>درخواست‌های ماموریت</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    if not requests:
-        text += "✅ هیچ درخواست در انتظار نیست"
-    else:
-        for r in requests:
-            title = html.escape(r['task_title'] or "")
-            text += f"🆔 #<code>{r['request_id']}</code> | 👤 <code>{r['user_id']}</code>\n🎖 {title} | 💰 {format_number(r['reward'])}\n\n"
-
-    kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def admin_approve_mission_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    request_id = int(query.data.split("_")[-1])
-    request = db.get_mission_request(request_id)
-    if not request or request['status'] != 'pending':
-        await query.answer("❌ یافت نشد!", show_alert=True)
-        return
-
-    task = db.get_task(request['task_id'])
-    if not task:
-        return
-
-    db.add_dark_points(request['user_id'], task['reward'])
-    db.mark_task_completed(request['user_id'], request['task_id'])
-    db.approve_mission_request(request_id)
-
-    await query.answer("✅ تایید شد", show_alert=True)
-
-    try:
-        await context.bot.send_message(
-            request['user_id'],
-            f"✅ <b>ماموریت تایید شد!</b>\n🎖 {task['channel_title']}\n💰 +<code>{format_number(task['reward'])}</code> DP",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception:
-        pass
-
-    try:
-        await query.edit_message_text(query.message.text_html + "\n\n✅ تایید شد", parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-
-async def admin_reject_mission_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    request_id = int(query.data.split("_")[-1])
-    request = db.get_mission_request(request_id)
-    if not request or request['status'] != 'pending':
-        return
-
-    db.reject_mission_request(request_id)
-    await query.answer("❌ رد شد", show_alert=True)
-
-    try:
-        await context.bot.send_message(
-            request['user_id'],
-            "❌ ماموریت شما رد شد. می‌توانید دوباره ارسال کنید.",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception:
-        pass
-
-    try:
-        await query.edit_message_text(query.message.text_html + "\n\n❌ رد شد", parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-
-# ============ SHOP MANAGEMENT ============
-
-async def adm_shop_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    plans = db.get_shop_plans(only_active=False)
-    text = "🛍 <b>مدیریت فروشگاه</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    if not plans:
-        text += "❌ هیچ پلنی موجود نیست"
-    else:
-        for p in plans:
-            name = html.escape(p['name'])
-            stock_text = f"∞" if p['stock'] < 0 else str(p['stock'])
-            text += f"🛍 #{p['plan_id']} - {name}\n  💰 {format_number(p['price'])} | 📦 {stock_text} | 📊 فروش: {p['sold_count']}\n\n"
-
-    kb = [[InlineKeyboardButton("➕ افزودن محصول", callback_data="adm_add_shop_plan")]]
-    for p in plans:
-        name = html.escape(p['name'])[:20]
-        kb.append([InlineKeyboardButton(f"🗑 حذف #{p['plan_id']} - {name}", callback_data=f"adm_del_shop_{p['plan_id']}")])
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_add_shop_plan_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'add_shop_plan'
-    context.user_data['shop_step'] = 'name'
-    await query.edit_message_text(
-        "🛍 <b>افزودن محصول فروشگاه</b>\n\nنام محصول را بفرست:",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def adm_del_shop_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    plan_id = int(query.data.split("_")[-1])
-    db.delete_shop_plan(plan_id)
-    await query.answer("✅ حذف شد", show_alert=True)
-    await adm_shop_cb(update, context)
-
-
-# ============ REFERRAL/FIRST REWARD ============
-
-async def adm_ref_reward_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    current = get_referral_reward()
-    context.user_data['admin_action'] = 'set_ref_reward'
-    await query.edit_message_text(
-        f"👥 <b>تغییر پاداش رفرال</b>\n\nمقدار فعلی: <code>{format_number(current)}</code> DP\n\nمقدار جدید:",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def adm_first_reward_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    current = get_first_join_reward()
-    context.user_data['admin_action'] = 'set_first_reward'
-    await query.edit_message_text(
-        f"🎁 <b>تغییر هدیه ثبت‌نام</b>\n\nمقدار فعلی: <code>{format_number(current)}</code>\n\nمقدار جدید:",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# ============ BACKUP & RESTORE ============
-
-async def adm_backup_db_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer("⏳ در حال آماده‌سازی...")
-
-    try:
-        with open(db.db_name, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=query.from_user.id,
-                document=f,
-                filename=f"darkpoint_backup_{int(time.time())}.db",
-                caption=(
-                    f"💾 <b>بکاپ کامل دیتابیس</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-                    f"📅 {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"👥 کاربران: {db.get_all_users_count()}\n"
-                    f"💎 کل DP: {format_number(db.get_stats()['total_dp'])}\n\n"
-                    f"✅ شامل تمام جداول و اطلاعات\n⚠️ این فایل را امن نگه دارید"
-                ),
-                parse_mode=ParseMode.HTML
-            )
-        await query.message.reply_text("✅ بکاپ ارسال شد.")
-    except Exception as e:
-        await query.message.reply_text(f"❌ خطا:\n{str(e)[:200]}")
-
-
-async def adm_restore_db_cb(update, context):
-    """شروع فرآیند بازگردانی بکاپ"""
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    
-    context.user_data['admin_action'] = 'restore_db'
-    
-    await query.edit_message_text(
-        f"🔄 <b>بازگردانی بکاپ دیتابیس</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"📥 فایل بکاپ دیتابیس (<code>.db</code>) را به صورت <b>فایل (Document)</b> ارسال کنید.\n\n"
-        f"⚠️ <b>هشدار:</b>\n"
-        f"• تمام اطلاعات فعلی <b>پاک</b> خواهد شد\n"
-        f"• اطلاعات بکاپ جایگزین می‌شوند\n"
-        f"• بکاپ ایمنی خودکار گرفته می‌شود\n\n"
-        f"برای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# ============ PANEL PRICES & DELETE ============
-
-async def adm_panel_prices_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    price_500 = int(db.get_setting('panel_snai_500gb', str(DEFAULT_PANEL_PRICES['snai_500gb'])))
-    price_800 = int(db.get_setting('panel_snai_800gb', str(DEFAULT_PANEL_PRICES['snai_800gb'])))
-    price_1tb = int(db.get_setting('panel_snai_1tb', str(DEFAULT_PANEL_PRICES['snai_1tb'])))
-
-    text = (
-        f"💵 <b>قیمت پنل سنایی</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🛒 500GB: <code>{format_number(price_500)}</code>\n"
-        f"🛒 800GB: <code>{format_number(price_800)}</code>\n"
-        f"🛒 1TB: <code>{format_number(price_1tb)}</code>"
-    )
-    kb = [
-        [InlineKeyboardButton(f"✏️ 500GB ({format_number(price_500)})", callback_data="adm_edit_price_500gb")],
-        [InlineKeyboardButton(f"✏️ 800GB ({format_number(price_800)})", callback_data="adm_edit_price_800gb")],
-        [InlineKeyboardButton(f"✏️ 1TB ({format_number(price_1tb)})", callback_data="adm_edit_price_1tb")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")],
-    ]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_edit_price_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    data = query.data
-    if data == "adm_edit_price_500gb":
-        plan_key, plan_name = "panel_snai_500gb", "500GB"
-    elif data == "adm_edit_price_800gb":
-        plan_key, plan_name = "panel_snai_800gb", "800GB"
-    elif data == "adm_edit_price_1tb":
-        plan_key, plan_name = "panel_snai_1tb", "1TB"
-    else:
-        return
-    context.user_data['admin_action'] = 'set_panel_price'
-    context.user_data['panel_price_key'] = plan_key
-    context.user_data['panel_price_name'] = plan_name
-    await query.edit_message_text(f"✏️ قیمت جدید سنایی {plan_name} (DP):", parse_mode=ParseMode.HTML)
-
-
-async def adm_delete_panel_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    panels = db.get_all_custom_panels()
-    active_panels = [p for p in panels if p['active'] == 1]
-    text = "🗑 <b>حذف پلن پنل</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-    if not active_panels:
-        text += "❌ هیچ پلن سفارشی موجود نیست"
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")]]
-    else:
-        text += "پلن برای حذف انتخاب کنید:"
-        kb = []
-        for p in active_panels:
-            kb.append([InlineKeyboardButton(f"🗑 {p['name']} ({format_number(p['price'])})", callback_data=f"adm_del_panel_{p['panel_id']}")])
-        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")])
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_del_panel_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    panel_id = int(query.data.split("_")[-1])
-    db.delete_custom_panel(panel_id)
-    await query.answer("✅ حذف شد", show_alert=True)
-    await adm_delete_panel_cb(update, context)
-
-
-# ============ OTHER ADMIN ACTIONS ============
-
-async def adm_send_to_user_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'send_to_user_id'
-    await query.edit_message_text("💬 شماره کاربری مقصد:")
-
-
-async def adm_recent_orders_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-
-    conn = db.get_conn()
-    c = conn.cursor()
-    text = "📋 <b>آخرین سفارشات</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-
-    text += "🛒 <b>پنل:</b>\n"
-    c.execute("SELECT * FROM panel_orders ORDER BY created_at DESC LIMIT 5")
-    for o in c.fetchall():
-        text += f"• #<code>{o['order_id']}</code> {html.escape(o['plan_name'])} - <code>{o['user_id']}</code>\n"
-
-    text += "\n⭐ <b>استارز:</b>\n"
-    c.execute("SELECT * FROM stars_orders ORDER BY created_at DESC LIMIT 5")
-    for o in c.fetchall():
-        text += f"• #<code>{o['order_id']}</code> {o['amount']}⭐ - <code>{o['user_id']}</code>\n"
-
-    text += "\n🎁 <b>گیفت:</b>\n"
-    c.execute("SELECT * FROM gift_orders ORDER BY created_at DESC LIMIT 5")
-    for o in c.fetchall():
-        text += f"• #<code>{o['order_id']}</code> {html.escape(o['gift_type'])} - <code>{o['user_id']}</code>\n"
-
-    text += "\n🛍 <b>فروشگاه:</b>\n"
-    c.execute("SELECT * FROM shop_orders ORDER BY created_at DESC LIMIT 5")
-    for o in c.fetchall():
-        text += f"• #<code>{o['order_id']}</code> {html.escape(o['plan_name'])} - <code>{o['user_id']}</code>\n"
-
-    conn.close()
-    kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_back")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def adm_gift_top_cb(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    context.user_data['admin_action'] = 'gift_top_count'
-    await query.edit_message_text("🎁 چند نفر برتر؟ (مثال: 10)")
-
-
-# ============ ADMIN CALLBACKS: SEND CONFIG & REPLY ============
-
-async def admin_send_config_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    parts = query.data.split("_")
-    order_id = int(parts[3])
-    user_id = int(parts[4])
-    await query.answer()
-    context.user_data['admin_action'] = 'send_config'
-    context.user_data['config_order_id'] = order_id
-    context.user_data['config_user_id'] = user_id
-    await query.message.reply_text(
-        f"📤 <b>ارسال کانفیگ</b>\n👤 <code>{user_id}</code>\n🆔 <code>{order_id}</code>\n\nکانفیگ را بفرست:",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def admin_reply_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    user_id = int(query.data.split("_")[-1])
-    await query.answer()
-    context.user_data['admin_action'] = 'reply_user'
-    context.user_data['reply_user_id'] = user_id
-    await query.message.reply_text(
-        f"💬 <b>پاسخ به کاربر</b>\n👤 <code>{user_id}</code>\n\nپیام را بفرست:",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def admin_confirm_stars_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer("✅ تایید شد", show_alert=True)
-    try:
-        await query.edit_message_text(query.message.text_html + "\n\n✅ تایید توسط ادمین", parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-
-async def admin_confirm_gift_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    await query.answer("✅ تایید شد", show_alert=True)
-    try:
-        await query.edit_message_text(query.message.text_html + "\n\n✅ تایید توسط ادمین", parse_mode=ParseMode.HTML)
-    except Exception:
-        pass# ============ ADMIN CALLBACK ROUTER ============
-
-async def admin_callbacks(update, context):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        await query.answer("❌", show_alert=True)
-        return
-
-    data = query.data
-
-    if data == "adm_back":
-        await admin_panel(update, context)
-    elif data == "adm_stats":
-        await admin_stats_cb(update, context)
-    elif data == "adm_mining_stats":
-        await adm_mining_stats_cb(update, context)
-    elif data == "adm_toggle_bot":
-        await adm_toggle_bot_cb(update, context)
-    elif data == "adm_broadcast_msg":
-        await adm_broadcast_msg_cb(update, context)
-    elif data == "adm_broadcast_fwd":
-        await adm_broadcast_fwd_cb(update, context)
-    elif data == "adm_broadcast_groups":
-        await adm_broadcast_groups_cb(update, context)
-    elif data == "adm_list_groups":
-        await adm_list_groups_cb(update, context)
-    elif data == "adm_channels":
-        await adm_channels_cb(update, context)
-    elif data == "adm_add_channel":
-        await adm_add_channel_cb(update, context)
-    elif data.startswith("adm_del_ch_"):
-        await adm_del_ch_cb(update, context)
-    elif data == "adm_tasks":
-        await adm_tasks_cb(update, context)
-    elif data == "adm_add_task_channel":
-        await adm_add_task_channel_cb(update, context)
-    elif data == "adm_add_task_mission":
-        await adm_add_task_mission_cb(update, context)
-    elif data.startswith("adm_del_task_"):
-        await adm_del_task_cb(update, context)
-    elif data == "adm_mission_requests":
-        await adm_mission_requests_cb(update, context)
-    elif data == "adm_shop":
-        await adm_shop_cb(update, context)
-    elif data == "adm_add_shop_plan":
-        await adm_add_shop_plan_cb(update, context)
-    elif data.startswith("adm_del_shop_"):
-        await adm_del_shop_cb(update, context)
-    elif data == "adm_ref_reward":
-        await adm_ref_reward_cb(update, context)
-    elif data == "adm_first_reward":
-        await adm_first_reward_cb(update, context)
-    elif data == "adm_backup_db":
-        await adm_backup_db_cb(update, context)
-    elif data == "adm_restore_db":
-        await adm_restore_db_cb(update, context)
-    elif data == "adm_panel_prices":
-        await adm_panel_prices_cb(update, context)
-    elif data.startswith("adm_edit_price_"):
-        await adm_edit_price_cb(update, context)
-    elif data == "adm_delete_panel":
-        await adm_delete_panel_cb(update, context)
-    elif data.startswith("adm_del_panel_"):
-        await adm_del_panel_cb(update, context)
-    elif data == "adm_send_to_user":
-        await adm_send_to_user_cb(update, context)
-    elif data == "adm_recent_orders":
-        await adm_recent_orders_cb(update, context)
-    elif data == "adm_gift_top":
-        await adm_gift_top_cb(update, context)
-    elif data == "adm_add_dp":
-        await query.answer()
-        context.user_data['admin_action'] = 'add_dp'
-        await query.edit_message_text("💰 شماره کاربری:")
-    elif data == "adm_remove_dp":
-        await query.answer()
-        context.user_data['admin_action'] = 'remove_dp'
-        await query.edit_message_text("💸 شماره کاربری:")
-    elif data == "adm_search_user":
-        await query.answer()
-        context.user_data['admin_action'] = 'search_user'
-        await query.edit_message_text("🔍 شماره یا @username:")
-    elif data == "adm_ban_user":
-        await query.answer()
-        context.user_data['admin_action'] = 'ban_user'
-        await query.edit_message_text("🚫 شماره کاربری:")
-    elif data == "adm_create_panel":
-        await query.answer()
-        context.user_data['admin_action'] = 'create_panel'
-        context.user_data['panel_step'] = 'name'
-        await query.edit_message_text("📦 نام پلن:")
-    elif data == "adm_set_gift_price":
-        await query.answer()
-        context.user_data['admin_action'] = 'set_gift_price'
-        await query.edit_message_text("💵 قیمت گیفت (DP):")
-    elif data == "adm_set_stars_price":
-        await query.answer()
-        context.user_data['admin_action'] = 'set_stars_price'
-        await query.edit_message_text(f"⭐ قیمت {STARS_AMOUNT} استارز (DP):")
-    elif data == "adm_toggle_gift":
-        cur = db.get_setting('gift_section_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('gift_section_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_stars":
-        cur = db.get_setting('stars_section_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('stars_section_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_buydp":
-        cur = db.get_setting('buy_dp_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('buy_dp_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_buypanel":
-        cur = db.get_setting('buy_panel_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('buy_panel_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_crash":
-        cur = db.get_setting('crash_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('crash_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_dice":
-        cur = db.get_setting('dice_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('dice_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_guess":
-        cur = db.get_setting('guess_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('guess_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_casino":
-        cur = db.get_setting('casino_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('casino_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_bomb":
-        cur = db.get_setting('bomb_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('bomb_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_football":
-        cur = db.get_setting('football_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('football_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_wheel":
-        cur = db.get_setting('wheel_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('wheel_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_tasks":
-        cur = db.get_setting('tasks_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('tasks_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_miner":
-        cur = db.get_setting('miner_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('miner_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_shop":
-        cur = db.get_setting('shop_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('shop_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_toggle_convert":
-        cur = db.get_setting('convert_active', '1')
-        new = '0' if cur == '1' else '1'
-        db.set_setting('convert_active', new)
-        await query.answer(f"{'✅' if new=='1' else '❌'}", show_alert=True)
-        await admin_panel(update, context)
-    elif data == "adm_create_check":
-        await query.answer()
-        context.user_data['admin_action'] = 'create_check'
-        await query.edit_message_text("📝 مبلغ چک (DP):")
-    elif data == "adm_add_gift_plan":
-        await query.answer()
-        context.user_data['admin_action'] = 'add_gift_plan'
-        context.user_data['gift_plan_step'] = 'name'
-        await query.edit_message_text("🎁 نام پلن گیفت:")
-    elif data == "adm_gift_all":
-        await query.answer()
-        context.user_data['admin_action'] = 'gift_all'
-        await query.edit_message_text("🎁 مقدار DP هدیه به همه:")
-
-
-# ============ HANDLE ADMIN TEXT INPUTS ============
-
-async def handle_admin_text(update, context):
-    user = update.effective_user
-    text = update.message.text.strip() if update.message.text else ""
-    action = context.user_data.get('admin_action')
-
-    # افزودن کانال جوین اجباری
-    if action == 'add_channel':
-        username = text.strip()
-        if not username.startswith('@'):
-            username = '@' + username
-        try:
-            chat = await context.bot.get_chat(username)
-            title = chat.title or username
-            if db.add_force_channel(username, title):
-                await update.message.reply_text(f"✅ کانال {username} اضافه شد!")
-            else:
-                await update.message.reply_text("❌ قبلاً اضافه شده!")
-        except Exception as e:
-            await update.message.reply_text(f"❌ خطا: {str(e)[:100]}")
-        context.user_data.pop('admin_action', None)
-        return
-
-    # افزودن تسک عضویت کانال
-    if action == 'add_task_channel':
-        step = context.user_data.get('task_step')
-        if step == 'channel':
-            username = text.strip()
-            if not username.startswith('@'):
-                username = '@' + username
-            try:
-                chat = await context.bot.get_chat(username)
-                title = chat.title or username
-                context.user_data['task_channel'] = username
-                context.user_data['task_title'] = title
-                context.user_data['task_step'] = 'reward'
-                await update.message.reply_text(f"✅ کانال: {username}\n\n💰 پاداش (DP):", parse_mode=ParseMode.HTML)
-            except Exception as e:
-                await update.message.reply_text(f"❌ {str(e)[:100]}")
-                context.user_data.clear()
-        elif step == 'reward':
-            try:
-                context.user_data['task_reward'] = int(text)
-                context.user_data['task_step'] = 'capacity'
-                await update.message.reply_text("👥 ظرفیت تسک (۰ = نامحدود):", parse_mode=ParseMode.HTML)
-            except Exception:
-                await update.message.reply_text("❌ عدد!")
-                context.user_data.clear()
-        elif step == 'capacity':
-            try:
-                capacity = int(text)
-                channel = context.user_data['task_channel']
-                title = context.user_data['task_title']
-                reward = context.user_data['task_reward']
-                task_id = db.add_task('channel', channel, title, '', reward, capacity)
-                cap_text = f"ظرفیت: {capacity}" if capacity > 0 else "نامحدود"
-                await update.message.reply_text(
-                    f"✅ تسک اضافه شد!\n📢 {channel}\n💰 <code>{format_number(reward)}</code>\n👥 {cap_text}\n🆔 <code>{task_id}</code>",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                await update.message.reply_text("❌")
-            context.user_data.clear()
-        return
-
-    # افزودن تسک ماموریت
-    if action == 'add_task_mission':
-        step = context.user_data.get('task_step')
-        if step == 'title':
-            context.user_data['task_title'] = text
-            context.user_data['task_step'] = 'description'
-            await update.message.reply_text("📝 توضیحات ماموریت:")
-        elif step == 'description':
-            context.user_data['task_description'] = text
-            context.user_data['task_step'] = 'reward'
-            await update.message.reply_text("💰 پاداش (DP):")
-        elif step == 'reward':
-            try:
-                context.user_data['task_reward'] = int(text)
-                context.user_data['task_step'] = 'capacity'
-                await update.message.reply_text("👥 ظرفیت (۰ = نامحدود):")
-            except Exception:
-                await update.message.reply_text("❌")
-                context.user_data.clear()
-        elif step == 'capacity':
-            try:
-                capacity = int(text)
-                title = context.user_data['task_title']
-                description = context.user_data['task_description']
-                reward = context.user_data['task_reward']
-                task_id = db.add_task('mission', '', title, description, reward, capacity)
-                cap_text = f"ظرفیت: {capacity}" if capacity > 0 else "نامحدود"
-                await update.message.reply_text(
-                    f"✅ ماموریت اضافه شد!\n🎖 {html.escape(title)}\n💰 <code>{format_number(reward)}</code>\n👥 {cap_text}",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                await update.message.reply_text("❌")
-            context.user_data.clear()
-        return
-
-    # تغییر پاداش رفرال
-    if action == 'set_ref_reward':
-        try:
-            amount = int(text)
-            db.set_setting('referral_reward', str(amount))
-            await update.message.reply_text(f"✅ پاداش رفرال: <code>{format_number(amount)}</code>", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    # تغییر هدیه ثبت‌نام
-    if action == 'set_first_reward':
-        try:
-            amount = int(text)
-            db.set_setting('first_join_reward', str(amount))
-            await update.message.reply_text(f"✅ هدیه: <code>{format_number(amount)}</code>", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
+    # ── دارک / دارک کانفیگ ──
+    if text in ('دارک', 'دارک کانفیگ', '/dark', '/config'):
+        await cmd_dark(update, ctx)
         return
 
-    # افزودن DP
-    if action == 'add_dp':
-        if 'admin_target_user' not in context.user_data:
-            try:
-                context.user_data['admin_target_user'] = int(text)
-                await update.message.reply_text(f"💰 چقدر به <code>{text}</code>؟", parse_mode=ParseMode.HTML)
-                return
-            except Exception:
-                await update.message.reply_text("❌")
-                context.user_data.clear()
-                return
-        else:
-            try:
-                amount = int(text)
-                target_id = context.user_data['admin_target_user']
-                if not db.get_user(target_id):
-                    db.create_user(target_id)
-                db.add_dark_points(target_id, amount)
-                new_balance = db.get_balance(target_id)
-                await update.message.reply_text(
-                    f"✅ +<code>{format_number(amount)}</code> به <code>{target_id}</code>\n💎 موجودی: <code>{format_number(new_balance)}</code>",
-                    parse_mode=ParseMode.HTML
-                )
-                try:
-                    await context.bot.send_message(target_id, f"🎁 هدیه ادمین!\n+<code>{format_number(amount)}</code> DP", parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
-            except Exception:
-                await update.message.reply_text("❌")
-            context.user_data.clear()
-            return
-
-    # کسر DP
-    if action == 'remove_dp':
-        if 'admin_target_user' not in context.user_data:
-            try:
-                context.user_data['admin_target_user'] = int(text)
-                await update.message.reply_text("💸 چقدر کم شود؟")
-                return
-            except Exception:
-                context.user_data.clear()
-                return
-        else:
-            try:
-                amount = int(text)
-                target_id = context.user_data['admin_target_user']
-                db.remove_dark_points(target_id, amount)
-                await update.message.reply_text(f"✅ -<code>{format_number(amount)}</code> از <code>{target_id}</code>", parse_mode=ParseMode.HTML)
-            except Exception:
-                await update.message.reply_text("❌")
-            context.user_data.clear()
-            return
-
-    # جستجوی کاربر
-    if action == 'search_user':
-        u = None
-        try:
-            uid = int(text)
-            u = db.get_user(uid)
-        except Exception:
-            conn = db.get_conn()
-            c = conn.cursor()
-            uname = text.replace("@", "")
-            c.execute("SELECT * FROM users WHERE username = ?", (uname,))
-            u = c.fetchone()
-            conn.close()
-
-        if not u:
-            await update.message.reply_text("❌ یافت نشد!")
-        else:
-            banned = "🚫 بن" if u['is_banned'] else "✅ فعال"
-            name = html.escape(u['first_name'] or "")
-            reply_kb = [[InlineKeyboardButton("💬 پاسخ", callback_data=f"admin_reply_{u['user_id']}")]]
-            await update.message.reply_text(
-                f"👤 <b>کاربر</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-                f"🆔 <code>{u['user_id']}</code>\n📛 @{u['username'] or 'ندارد'}\n👤 <b>{name}</b>\n"
-                f"💰 <code>{format_number(u['dark_points'])}</code>\n📊 سطح: {u['level']}\n"
-                f"👥 رفرال: {u['referral_count']}\n🏭 کارخونه: {u['factory_level']}\n"
-                f"🏦 بانک: <code>{format_number(u['bank_balance'])}</code>\n📊 وضعیت: {banned}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(reply_kb)
-            )
-        context.user_data.clear()
-        return
-
-    # بن/آنبن
-    if action == 'ban_user':
-        try:
-            target_id = int(text)
-            u = db.get_user(target_id)
-            if not u:
-                await update.message.reply_text("❌ یافت نشد!")
-            else:
-                if u['is_banned']:
-                    db.unban_user(target_id)
-                    await update.message.reply_text(f"✅ <code>{target_id}</code> آنبن شد", parse_mode=ParseMode.HTML)
-                else:
-                    db.ban_user(target_id)
-                    await update.message.reply_text(f"🚫 <code>{target_id}</code> بن شد", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    # ساخت پلن پنل
-    if action == 'create_panel':
-        step = context.user_data.get('panel_step')
-        if step == 'name':
-            context.user_data['panel_name'] = text
-            context.user_data['panel_step'] = 'desc'
-            await update.message.reply_text("📝 توضیحات:")
-        elif step == 'desc':
-            context.user_data['panel_desc'] = text
-            context.user_data['panel_step'] = 'price'
-            await update.message.reply_text("💰 قیمت:")
-        elif step == 'price':
-            try:
-                context.user_data['panel_price'] = int(text)
-                context.user_data['panel_step'] = 'data'
-                await update.message.reply_text("📊 حجم:")
-            except Exception:
-                await update.message.reply_text("❌")
-        elif step == 'data':
-            db.add_custom_panel(context.user_data['panel_name'], context.user_data['panel_desc'], context.user_data['panel_price'], text)
-            await update.message.reply_text(f"✅ پلن ساخته شد!", parse_mode=ParseMode.HTML)
-            context.user_data.clear()
-        return
-
-    # تغییر قیمت گیفت/استارز/پنل
-    if action == 'set_gift_price':
-        try:
-            price = int(text)
-            db.set_setting('gift_teddy_price', str(price))
-            await update.message.reply_text(f"✅ قیمت گیفت: <code>{format_number(price)}</code>", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    if action == 'set_stars_price':
-        try:
-            price = int(text)
-            db.set_setting('stars_price', str(price))
-            await update.message.reply_text(f"✅ قیمت استارز: <code>{format_number(price)}</code>", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    if action == 'set_panel_price':
-        try:
-            price = int(text)
-            plan_key = context.user_data['panel_price_key']
-            plan_name = context.user_data['panel_price_name']
-            db.set_setting(plan_key, str(price))
-            await update.message.reply_text(f"✅ قیمت سنایی {plan_name}: <code>{format_number(price)}</code>", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    # ارسال به کاربر خاص
-    if action == 'send_to_user_id':
-        try:
-            target_id = int(text)
-            context.user_data['admin_action'] = 'send_to_user_msg'
-            context.user_data['send_target_id'] = target_id
-            await update.message.reply_text(f"✅ کاربر <code>{target_id}</code>\n\nپیام را بفرست:", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-            context.user_data.clear()
-        return
-
-    # هدیه برترین‌ها
-    if action == 'gift_top_count':
-        try:
-            count = int(text)
-            context.user_data['admin_action'] = 'gift_top_amount'
-            context.user_data['gift_top_count'] = count
-            await update.message.reply_text(f"✅ {count} نفر\n\nمقدار DP هر نفر:")
-        except Exception:
-            await update.message.reply_text("❌")
-            context.user_data.clear()
-        return
-
-    if action == 'gift_top_amount':
-        try:
-            amount = int(text)
-            count = context.user_data['gift_top_count']
-            top_users = db.get_leaderboard(count)
-            for tu in top_users:
-                db.add_dark_points(tu['user_id'], amount)
-                try:
-                    await context.bot.send_message(tu['user_id'], f"🎁 جزو {count} نفر برتر!\n💰 +<code>{format_number(amount)}</code>", parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
-            await update.message.reply_text(f"✅ به {len(top_users)} کاربر هدیه داده شد.")
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    # ساخت چک
-    if action == 'create_check':
-        try:
-            amount = int(text)
-            code = db.create_check(amount)
-            global BOT_USERNAME
-            if not BOT_USERNAME:
-                me = await context.bot.get_me()
-                BOT_USERNAME = me.username
-            link = f"https://t.me/{BOT_USERNAME}?start=check_{code}"
-            await update.message.reply_text(f"✅ چک ساخته شد!\n💰 <code>{format_number(amount)}</code>\n🔗 {link}", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    # افزودن پلن گیفت
-    if action == 'add_gift_plan':
-        step = context.user_data.get('gift_plan_step')
-        if step == 'name':
-            context.user_data['gift_plan_name'] = text
-            context.user_data['gift_plan_step'] = 'price'
-            await update.message.reply_text("💰 قیمت (DP):")
-        elif step == 'price':
-            try:
-                price = int(text)
-                name = context.user_data['gift_plan_name']
-                conn = db.get_conn()
-                c = conn.cursor()
-                c.execute("SELECT COUNT(*) as cnt FROM settings WHERE key LIKE 'gift_plan_%_name'")
-                cnt = c.fetchone()['cnt']
-                conn.close()
-                plan_num = cnt + 1
-                db.set_setting(f'gift_plan_{plan_num}_name', name)
-                db.set_setting(f'gift_plan_{plan_num}_price', str(price))
-                await update.message.reply_text(f"✅ پلن {html.escape(name)}: <code>{format_number(price)}</code>", parse_mode=ParseMode.HTML)
-            except Exception:
-                await update.message.reply_text("❌")
-            context.user_data.clear()
-        return
-
-    # هدیه به همه
-    if action == 'gift_all':
-        try:
-            amount = int(text)
-            users = db.get_all_user_ids()
-            for uid in users:
-                db.add_dark_points(uid, amount)
-            await update.message.reply_text(f"✅ هدیه به همه!\n💰 <code>{format_number(amount)}</code> به {len(users)} کاربر", parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text("❌")
-        context.user_data.clear()
-        return
-
-    # افزودن محصول فروشگاه
-    if action == 'add_shop_plan':
-        step = context.user_data.get('shop_step')
-        if step == 'name':
-            context.user_data['shop_name'] = text
-            context.user_data['shop_step'] = 'description'
-            await update.message.reply_text("📝 توضیحات محصول:")
-        elif step == 'description':
-            context.user_data['shop_description'] = text
-            context.user_data['shop_step'] = 'price'
-            await update.message.reply_text("💰 قیمت (DP):")
-        elif step == 'price':
-            try:
-                context.user_data['shop_price'] = int(text)
-                context.user_data['shop_step'] = 'stock'
-                await update.message.reply_text("📦 موجودی (0 = نامحدود):")
-            except Exception:
-                await update.message.reply_text("❌")
-                context.user_data.clear()
-        elif step == 'stock':
-            try:
-                stock = int(text)
-                if stock == 0:
-                    stock = -1  # نامحدود
-                context.user_data['shop_stock'] = stock
-                context.user_data['shop_step'] = 'content_type'
-                kb = [
-                    [InlineKeyboardButton("📄 متن / کانفیگ", callback_data="shop_type_text")],
-                    [InlineKeyboardButton("🖼 عکس", callback_data="shop_type_photo")],
-                    [InlineKeyboardButton("📁 فایل / Document", callback_data="shop_type_document")],
-                    [InlineKeyboardButton("🎬 ویدیو", callback_data="shop_type_video")],
-                ]
-                await update.message.reply_text(
-                    "📦 <b>نوع محتوا را انتخاب کنید:</b>\n\nپس از انتخاب، محتوا را ارسال کنید.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
-            except Exception:
-                await update.message.reply_text("❌")
-                context.user_data.clear()
-        return# ============ SHOP CONTENT TYPE CALLBACKS ============
-
-async def shop_type_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """انتخاب نوع محتوای فروشگاه"""
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        return
-    
-    content_type = query.data.replace("shop_type_", "")  # text, photo, document, video
-    context.user_data['shop_content_type'] = content_type
-    context.user_data['shop_step'] = 'content'
-    
-    await query.answer()
-    
-    type_text = {
-        'text': 'متن / کانفیگ',
-        'photo': 'عکس',
-        'document': 'فایل',
-        'video': 'ویدیو'
-    }
-    
-    if content_type == 'text':
-        await query.edit_message_text(
-            f"📄 <b>متن / کانفیگ محصول را ارسال کنید:</b>\n\n"
-            f"این محتوا به کاربر پس از خرید ارسال می‌شود.\n\n"
-            f"برای لغو: /cancel",
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        await query.edit_message_text(
-            f"📥 <b>{type_text[content_type]} محصول را ارسال کنید:</b>\n\n"
-            f"می‌توانید همراه آن یک متن (کپشن) هم بنویسید.\n\n"
-            f"برای لغو: /cancel",
-            parse_mode=ParseMode.HTML
-        )
-
-
-# ============ PRIVATE MESSAGE HANDLER ============
-
-async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
+    # ── موجودی ──
+    if text in ('موجودی', '/balance'):
+        await cmd_balance_group(update, ctx)
         return
 
-    if db.is_banned(user.id):
+    # ── پروفایل دارکی ──
+    if text in ('پروفایل دارکی', '/profile'):
+        await cmd_profile_group(update, ctx)
         return
 
-    if not is_bot_active() and not is_admin(user.id):
-        await update.message.reply_text(
-            "⚠️ <b>ربات موقتاً خاموش است</b>\n🔧 از طرف پشتیبانی غیرفعال شده است.",
-            parse_mode=ParseMode.HTML
-        )
+    # ── بازی [amount] / انفجار [amount] (Crash) ──
+    if text.startswith('بازی ') or text.startswith('انفجار '):
+        await cmd_crash(update, ctx)
         return
-
-    if not db.get_user(user.id):
-        db.create_user(user.id, user.username or "", user.first_name or "")
-
-    db.update_last_active(user.id)
-
-    # ============ ادمین: اقدامات رسانه‌ای ============
-    if is_admin(user.id):
-        action = context.user_data.get('admin_action')
-
-        # بازگردانی دیتابیس
-        if action == 'restore_db':
-            if not update.message.document:
-                await update.message.reply_text(
-                    "❌ لطفاً فایل دیتابیس را به صورت <b>Document (فایل)</b> ارسال کنید.\n\n"
-                    "💡 فایل باید پسوند <code>.db</code> داشته باشد.\n\n"
-                    "برای لغو: /cancel",
-                    parse_mode=ParseMode.HTML
-                )
-                return
-
-            doc = update.message.document
-            file_name = doc.file_name or ""
-
-            if not file_name.endswith('.db'):
-                await update.message.reply_text("❌ فایل باید پسوند <code>.db</code> داشته باشد!", parse_mode=ParseMode.HTML)
-                return
-
-            if doc.file_size > 50 * 1024 * 1024:
-                await update.message.reply_text("❌ حجم فایل بیشتر از ۵۰ مگابایت!")
-                return
-
-            status_msg = await update.message.reply_text("⏳ <b>در حال دانلود فایل بکاپ...</b>", parse_mode=ParseMode.HTML)
-
-            try:
-                # بکاپ ایمنی از دیتابیس فعلی
-                safety_backup = db.db_name + f".safety_{int(time.time())}.bak"
-                try:
-                    shutil.copy2(db.db_name, safety_backup)
-                    await status_msg.edit_text("✅ بکاپ ایمنی گرفته شد\n⏳ در حال دانلود فایل جدید...", parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
-
-                # دانلود فایل
-                file = await context.bot.get_file(doc.file_id)
-                temp_path = db.db_name + ".new_temp"
-                await file.download_to_drive(temp_path)
-
-                await status_msg.edit_text("✅ فایل دانلود شد\n⏳ در حال اعتبارسنجی...", parse_mode=ParseMode.HTML)
-
-                # تست اعتبار فایل
-                try:
-                    test_conn = sqlite3.connect(temp_path)
-                    test_cursor = test_conn.cursor()
-                    test_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-                    if not test_cursor.fetchone():
-                        test_conn.close()
-                        os.remove(temp_path)
-                        await status_msg.edit_text(
-                            "❌ <b>فایل نامعتبر!</b>\n\nجدول <code>users</code> یافت نشد.",
-                            parse_mode=ParseMode.HTML
-                        )
-                        context.user_data.clear()
-                        return
-
-                    test_cursor.execute("SELECT COUNT(*) FROM users")
-                    users_count = test_cursor.fetchone()[0]
-                    test_cursor.execute("SELECT COALESCE(SUM(dark_points), 0) FROM users")
-                    total_dp = test_cursor.fetchone()[0]
-                    test_conn.close()
-
-                    await status_msg.edit_text(
-                        f"✅ فایل معتبر!\n👥 کاربران: {users_count}\n💎 کل DP: {format_number(total_dp)}\n\n⏳ در حال جایگزینی...",
-                        parse_mode=ParseMode.HTML
-                    )
-
-                except Exception as e:
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-                    await status_msg.edit_text(f"❌ فایل نامعتبر!\n{str(e)[:200]}", parse_mode=ParseMode.HTML)
-                    context.user_data.clear()
-                    return
-
-                # جایگزینی دیتابیس
-                try:
-                    gc.collect()
-                    await asyncio.sleep(1)
-                    shutil.move(temp_path, db.db_name)
-                    await asyncio.sleep(1)
-
-                    # ری‌لود دیتابیس
-                    db.__init__()
-
-                    final_stats = db.get_stats()
-
-                    await status_msg.edit_text(
-                        f"✅ <b>بازگردانی موفق!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-                        f"📊 <b>آمار دیتابیس جدید:</b>\n\n"
-                        f"👥 کاربران: <b>{final_stats['total_users']}</b>\n"
-                        f"💎 کل DP: <code>{format_number(final_stats['total_dp'])}</code>\n"
-                        f"🏦 کل بانک: <code>{format_number(final_stats['total_bank'])}</code>\n"
-                        f"📦 سفارش پنل: <b>{final_stats['panel_orders']}</b>\n"
-                        f"⭐ سفارش استارز: <b>{final_stats['stars_orders']}</b>\n"
-                        f"🎁 سفارش گیفت: <b>{final_stats['gift_orders']}</b>\n\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"✅ تمام اطلاعات بازگردانی شد!\n"
-                        f"🚀 ربات آماده است!\n\n"
-                        f"💾 بکاپ ایمنی:\n<code>{safety_backup}</code>",
-                        parse_mode=ParseMode.HTML
-                    )
-
-                    try:
-                        await send_log(context,
-                            f"🔄 <b>دیتابیس بازگردانی شد!</b>\n\n"
-                            f"👨‍💼 ادمین: <code>{user.id}</code>\n"
-                            f"👥 کاربران: {final_stats['total_users']}\n"
-                            f"💎 کل DP: {format_number(final_stats['total_dp'])}"
-                        )
-                    except Exception:
-                        pass
-
-                except Exception as e:
-                    try:
-                        if os.path.exists(safety_backup):
-                            shutil.copy2(safety_backup, db.db_name)
-                            db.__init__()
-                    except Exception:
-                        pass
-                    await status_msg.edit_text(
-                        f"❌ خطا در جایگزینی!\nدیتابیس قبلی بازگردانی شد.\n{str(e)[:200]}",
-                        parse_mode=ParseMode.HTML
-                    )
-
-            except Exception as e:
-                await status_msg.edit_text(f"❌ خطا در دانلود!\n{str(e)[:200]}", parse_mode=ParseMode.HTML)
-
-            context.user_data.clear()
-            return
-
-        # پیام همگانی
-        if action == 'broadcast_msg':
-            context.user_data.pop('admin_action', None)
-            await do_broadcast(update, context, mode='copy')
-            return
-
-        # فوروارد همگانی
-        if action == 'broadcast_fwd':
-            context.user_data.pop('admin_action', None)
-            await do_broadcast(update, context, mode='forward')
-            return
-
-        # ارسال به گروه‌ها
-        if action == 'broadcast_groups':
-            context.user_data.pop('admin_action', None)
-            await do_broadcast_groups(update, context)
-            return
-
-        # ارسال کانفیگ پنل
-        if action == 'send_config':
-            order_id = context.user_data.get('config_order_id')
-            target_user_id = context.user_data.get('config_user_id')
-            try:
-                await context.bot.send_message(
-                    target_user_id,
-                    f"✅ <b>کانفیگ سفارش شما آماده شد!</b>\n━━━━━━━━━━━━━━━━━━\n🆔 <code>{order_id}</code>\n\n⬇️ کانفیگ:",
-                    parse_mode=ParseMode.HTML
-                )
-                await context.bot.copy_message(
-                    chat_id=target_user_id,
-                    from_chat_id=update.message.chat_id,
-                    message_id=update.message.message_id
-                )
-                await update.message.reply_text(f"✅ کانفیگ برای <code>{target_user_id}</code> ارسال شد.", parse_mode=ParseMode.HTML)
-            except Exception as e:
-                await update.message.reply_text(f"❌ خطا:\n{str(e)[:200]}")
-            context.user_data.clear()
-            return
-
-        # پاسخ به کاربر
-        if action == 'reply_user':
-            target_user_id = context.user_data.get('reply_user_id')
-            try:
-                await context.bot.send_message(target_user_id, "📩 <b>پیام از پشتیبانی:</b>", parse_mode=ParseMode.HTML)
-                await context.bot.copy_message(chat_id=target_user_id, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
-                await update.message.reply_text(f"✅ ارسال شد.", parse_mode=ParseMode.HTML)
-            except Exception as e:
-                await update.message.reply_text(f"❌ خطا:\n{str(e)[:200]}")
-            context.user_data.clear()
-            return
-
-        # ارسال به کاربر خاص
-        if action == 'send_to_user_msg':
-            target_id = context.user_data.get('send_target_id')
-            try:
-                await context.bot.send_message(target_id, "📩 <b>پیام از پشتیبانی:</b>", parse_mode=ParseMode.HTML)
-                await context.bot.copy_message(chat_id=target_id, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
-                await update.message.reply_text(f"✅ ارسال شد.", parse_mode=ParseMode.HTML)
-            except Exception as e:
-                await update.message.reply_text(f"❌ خطا:\n{str(e)[:200]}")
-            context.user_data.clear()
-            return
-
-        # افزودن محتوای فروشگاه
-        if action == 'add_shop_plan' and context.user_data.get('shop_step') == 'content':
-            content_type = context.user_data.get('shop_content_type', 'text')
-            name = context.user_data['shop_name']
-            description = context.user_data['shop_description']
-            price = context.user_data['shop_price']
-            stock = context.user_data['shop_stock']
-            
-            content_data = ""
-            content_file_id = ""
-            
-            if content_type == 'text':
-                if not update.message.text:
-                    await update.message.reply_text("❌ لطفاً فقط متن ارسال کنید!")
-                    return
-                content_data = update.message.text
-            
-            elif content_type == 'photo':
-                if not update.message.photo:
-                    await update.message.reply_text("❌ لطفاً عکس ارسال کنید!")
-                    return
-                content_file_id = update.message.photo[-1].file_id
-                content_data = update.message.caption or ""
-            
-            elif content_type == 'document':
-                if not update.message.document:
-                    await update.message.reply_text("❌ لطفاً فایل ارسال کنید!")
-                    return
-                content_file_id = update.message.document.file_id
-                content_data = update.message.caption or ""
-            
-            elif content_type == 'video':
-                if not update.message.video:
-                    await update.message.reply_text("❌ لطفاً ویدیو ارسال کنید!")
-                    return
-                content_file_id = update.message.video.file_id
-                content_data = update.message.caption or ""
-            
-            plan_id = db.add_shop_plan(name, description, price, content_type, content_data, content_file_id, stock)
-            stock_text = "نامحدود" if stock < 0 else str(stock)
-            
-            await update.message.reply_text(
-                f"✅ <b>محصول فروشگاه اضافه شد!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-                f"🛍 نام: {html.escape(name)}\n"
-                f"💰 قیمت: <code>{format_number(price)}</code> DP\n"
-                f"📦 موجودی: {stock_text}\n"
-                f"📄 نوع محتوا: {content_type}\n"
-                f"🆔 <code>{plan_id}</code>",
-                parse_mode=ParseMode.HTML
-            )
-            context.user_data.clear()
-            return
-
-    # ============ اسکرین‌شات ماموریت ============
-    if 'awaiting_mission_screenshot' in context.user_data:
-        task_id = context.user_data.get('awaiting_mission_screenshot')
-        task = db.get_task(task_id)
-
-        if not task:
-            await update.message.reply_text("❌ تسک یافت نشد!")
-            context.user_data.pop('awaiting_mission_screenshot', None)
-            return
 
-        if db.is_task_completed(user.id, task_id):
-            await update.message.reply_text("✅ قبلاً انجام شده!")
-            context.user_data.pop('awaiting_mission_screenshot', None)
-            return
-
-        if db.has_pending_mission_request(user.id, task_id):
-            await update.message.reply_text("⏳ در انتظار تایید قبلی!")
-            context.user_data.pop('awaiting_mission_screenshot', None)
-            return
-
-        if not update.message.photo:
-            await update.message.reply_text("❌ لطفاً عکس (اسکرین‌شات) ارسال کنید.")
-            return
-
-        request_id = db.create_mission_request(user.id, task_id)
-        context.user_data.pop('awaiting_mission_screenshot', None)
-
-        await update.message.reply_text(
-            f"✅ <b>اسکرین‌شات ارسال شد!</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-            f"🎖 {task['channel_title']}\n"
-            f"💰 پاداش: <code>{format_number(task['reward'])}</code>\n"
-            f"🆔 <code>{request_id}</code>\n\n"
-            f"⏳ منتظر تایید ادمین",
-            parse_mode=ParseMode.HTML
-        )
-
-        user_display = f"@{user.username}" if user.username else f"<code>{user.id}</code>"
-        for admin_id in ADMIN_IDS:
-            try:
-                caption = (
-                    f"🎖 <b>درخواست تایید ماموریت</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-                    f"👤 {user_display}\n🆔 <code>{user.id}</code>\n"
-                    f"🎖 {html.escape(task['channel_title'])}\n"
-                    f"📋 {html.escape(task['description'] or 'ندارد')}\n"
-                    f"💰 <code>{format_number(task['reward'])}</code>\n"
-                    f"🆔 درخواست: <code>{request_id}</code>"
-                )
-                admin_kb = [
-                    [
-                        InlineKeyboardButton("✅ تایید", callback_data=f"admin_approve_mission_{request_id}"),
-                        InlineKeyboardButton("❌ رد", callback_data=f"admin_reject_mission_{request_id}")
-                    ],
-                    [InlineKeyboardButton("💬 پاسخ", callback_data=f"admin_reply_{user.id}")]
-                ]
-                await context.bot.copy_message(
-                    chat_id=admin_id,
-                    from_chat_id=update.message.chat_id,
-                    message_id=update.message.message_id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(admin_kb)
-                )
-            except Exception as e:
-                logger.error(f"Admin notify error: {e}")
+    # ── تاس [amount] ──
+    if text.startswith('تاس '):
+        await cmd_dice(update, ctx)
         return
 
-    text = update.message.text.strip() if update.message.text else ""
-    if not text:
+    # ── حدس بزن [amount] ──
+    if text.startswith('حدس بزن'):
+        await cmd_guess(update, ctx)
         return
 
-    if text.lower() in ['/cancel', 'لغو', 'cancel']:
-        context.user_data.clear()
-        await update.message.reply_text("✅ لغو شد.")
+    # ── کازینو [amount] ──
+    if text.startswith('کازینو'):
+        await cmd_casino(update, ctx)
         return
-
-    # کپچای زیرمجموعه
-    if 'captcha_ans' in context.user_data:
-        try:
-            answer = int(text)
-        except Exception:
-            await update.message.reply_text("❌ فقط عدد!")
-            return
-
-        correct = context.user_data.get('captcha_ans')
-        if answer != correct:
-            q_text, ans = generate_captcha()
-            context.user_data['captcha_ans'] = ans
-            await update.message.reply_text(f"❌ اشتباه!\n❓ <code>{q_text}</code> = ?", parse_mode=ParseMode.HTML)
-            return
-
-        joined, not_joined = await check_force_join(user.id, context)
-        if not joined:
-            await update.message.reply_text(
-                f"📢 ابتدا در کانال‌ها عضو شوید:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_force_join_keyboard("check_join_ref")
-            )
-            return
 
-        referrer_id = context.user_data.get('pending_ref', 0)
-        if referrer_id > 0:
-            db.add_referral(referrer_id)
-            ref_reward = get_referral_reward()
-            db.add_dark_points(referrer_id, ref_reward)
-            try:
-                await context.bot.send_message(
-                    referrer_id,
-                    f"🎉 <b>زیرمجموعه جدید!</b>\n💰 +{format_number(ref_reward)} DP!",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-
-        context.user_data.pop('captcha_ans', None)
-        context.user_data.pop('pending_ref', None)
-
-        u = db.get_user(user.id)
-        if u and not u['first_reward_claimed']:
-            reward = db.claim_first_reward(user.id)
-            if reward:
-                await update.message.reply_text(
-                    f"🎉 خوش‌آمدید!\n🎁 +<code>{format_number(reward)}</code> DP",
-                    parse_mode=ParseMode.HTML
-                )
-
-        await update.message.reply_text("✅ <b>تایید هویت موفق!</b>", parse_mode=ParseMode.HTML)
-        await show_main_menu(update, context)
+    # ── بمب [amount] ──
+    if text.startswith('بمب'):
+        await cmd_bomb(update, ctx)
         return
 
-    # اقدامات متنی ادمین
-    if is_admin(user.id) and 'admin_action' in context.user_data:
-        await handle_admin_text(update, context)
+    # ── انتقال [amount] ──
+    if text.startswith('انتقال '):
+        await cmd_transfer(update, ctx)
         return
 
-    # شماره کارت بانک
-    if context.user_data.get('awaiting_bank_card'):
-        if len(text) != 13 or not text.isdigit():
-            await update.message.reply_text("❌ ۱۳ رقم انگلیسی!")
-            return
-        if db.card_exists(text):
-            await update.message.reply_text("❌ کارت تکراری!")
-            return
-        if not db.remove_dark_points(user.id, BANK_OPEN_COST):
-            await update.message.reply_text("❌ موجودی ناکافی!")
-            context.user_data.pop('awaiting_bank_card', None)
-            return
-        db.open_bank_account(user.id, text)
-        context.user_data.pop('awaiting_bank_card', None)
-        await update.message.reply_text(f"✅ حساب افتتاح شد!\n💳 <code>{text}</code>", parse_mode=ParseMode.HTML)
+    # ── بانک دارکی ──
+    if text in ('بانک دارکی', '/bank'):
+        await cmd_bank_group(update, ctx)
         return
 
-    # واریز بانک
-    if context.user_data.get('awaiting_bank_deposit'):
-        try:
-            amount = int(text)
-            if amount <= 0:
-                await update.message.reply_text("❌")
-                return
-            if db.bank_deposit(user.id, amount):
-                context.user_data.pop('awaiting_bank_deposit', None)
-                await update.message.reply_text(
-                    f"✅ واریز موفق!\n💰 <code>{format_number(amount)}</code>\n📈 سود ۱۵٪ بعد از ۲۴ ساعت",
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await update.message.reply_text("❌ موجودی ناکافی!")
-        except Exception:
-            await update.message.reply_text("❌")
+    # ── ماینر دارکی ──
+    if text in ('ماینر دارکی', '/miner'):
+        await cmd_miner_group(update, ctx)
         return
-
-    # مقصد استارز
-    if context.user_data.get('awaiting_stars_target'):
-        target = text.strip().replace("@", "")
-        stars_price = int(db.get_setting('stars_price', '1000000'))
-
-        if not db.remove_dark_points(user.id, stars_price):
-            await update.message.reply_text("❌ موجودی ناکافی!")
-            context.user_data.pop('awaiting_stars_target', None)
-            return
-
-        order_id = db.create_stars_order(user.id, target, 'other', STARS_AMOUNT, stars_price)
-        context.user_data.pop('awaiting_stars_target', None)
-
-        await update.message.reply_text(f"✅ سفارش ثبت شد!\n⭐ {STARS_AMOUNT}\n👤 <code>{target}</code>", parse_mode=ParseMode.HTML)
-
-        global BOT_USERNAME
-        if not BOT_USERNAME:
-            me = await context.bot.get_me()
-            BOT_USERNAME = me.username
-
-        user_display = f"@{user.username}" if user.username else f"<code>{user.id}</code>"
-        log_kb = [[InlineKeyboardButton("🤖 ورود", url=f"https://t.me/{BOT_USERNAME}")]]
-        await send_log(context,
-            f"⭐ سفارش استارز\n👤 {user_display}\n📍 <code>{target}</code>\n🆔 <code>{order_id}</code>",
-            reply_markup=InlineKeyboardMarkup(log_kb)
-        )
-
-        for admin_id in ADMIN_IDS:
-            try:
-                admin_kb = [
-                    [InlineKeyboardButton("💬 پاسخ", callback_data=f"admin_reply_{user.id}")],
-                    [InlineKeyboardButton("✅ تایید", callback_data=f"admin_confirm_stars_{order_id}")]
-                ]
-                await context.bot.send_message(
-                    admin_id,
-                    f"⭐ سفارش استارز\n👤 {user_display}\n📍 <code>{target}</code>",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(admin_kb)
-                )
-            except Exception:
-                pass
-        return# ============ IMPORT sqlite3 FOR RESTORE ============
-import sqlite3
-
-
-# ============ MAIN CALLBACK ROUTER ============
-
-async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    user = query.from_user
-
-    # چک خاموش بودن ربات
-    if not is_bot_active() and not is_admin(user.id):
-        if not data.startswith("adm_") and not data.startswith("admin_"):
-            await query.answer("⚠️ ربات موقتاً خاموش است!", show_alert=True)
-            return
-
-    # ====== منوهای اصلی ======
-    if data == "main_menu":
-        await show_main_menu(update, context, query=query)
-    elif data == "dark_point_menu":
-        await dark_point_menu(update, context)
-    elif data.startswith("dp_info_"):
-        await dp_info_page(update, context)
-    elif data == "referral_menu":
-        await referral_menu(update, context)
-
-    # ====== گردونه ======
-    elif data == "wheel_menu":
-        await wheel_menu(update, context)
-    elif data == "wheel_spin_free":
-        await wheel_spin_free_cb(update, context)
-    elif data == "wheel_spin_paid":
-        await wheel_spin_paid_cb(update, context)
-
-    # ====== تسک‌ها ======
-    elif data == "tasks_menu":
-        await tasks_menu(update, context)
-    elif data == "tasks_channel":
-        await tasks_channel_cb(update, context)
-    elif data == "tasks_mission":
-        await tasks_mission_cb(update, context)
-    elif data.startswith("task_view_"):
-        await task_view_cb(update, context)
-    elif data.startswith("task_verify_"):
-        await task_verify_cb(update, context)
-    elif data.startswith("task_mission_view_"):
-        await task_mission_view_cb(update, context)
-    elif data.startswith("task_mission_submit_"):
-        await task_mission_submit_cb(update, context)
-    elif data == "task_full":
-        await query.answer("🔒 ظرفیت پر شده!", show_alert=True)
-    elif data == "task_locked":
-        await query.answer("⏳ در انتظار یا پر", show_alert=True)
-
-    # ====== موجودی گروهی ======
-    elif data.startswith("show_my_balance_"):
-        await show_my_balance_cb(update, context)
-
-    # ====== تبدیل ارز ======
-    elif data == "convert_menu":
-        await convert_menu(update, context)
-    elif data == "convert_ton_all":
-        await convert_ton_all_cb(update, context)
-    elif data == "convert_usdt_all":
-        await convert_usdt_all_cb(update, context)
-    elif data == "convert_ton_insufficient" or data == "convert_usdt_insufficient":
-        await convert_insufficient_cb(update, context)
-
-    # ====== فروشگاه ======
-    elif data == "shop_menu":
-        await shop_menu(update, context)
-    elif data.startswith("shop_view_"):
-        await shop_view_cb(update, context)
-    elif data.startswith("shop_buy_"):
-        await shop_buy_cb(update, context)
-    elif data == "shop_out_of_stock":
-        await shop_out_of_stock_cb(update, context)
-    elif data.startswith("shop_type_"):
-        await shop_type_cb(update, context)
-
-    # ====== استارز ======
-    elif data == "stars_withdraw":
-        await stars_withdraw_menu(update, context)
-    elif data == "stars_do":
-        await stars_do(update, context)
-    elif data == "stars_self":
-        await stars_self_cb(update, context)
-    elif data == "stars_other":
-        await stars_other_cb(update, context)
-
-    # ====== گیفت ======
-    elif data == "free_gift":
-        await free_gift_menu(update, context)
-    elif data == "order_gift_teddy":
-        await order_gift_teddy(update, context)
-    elif data.startswith("order_gift_custom_"):
-        await order_gift_custom(update, context)
-
-    # ====== سایر ======
-    elif data == "buy_dp":
-        await buy_dp_menu(update, context)
-    elif data == "leaderboard":
-        await leaderboard_menu(update, context)
-    elif data == "like_challenge":
-        await like_challenge_menu(update, context)
-    elif data == "like_activate":
-        await like_activate_cb(update, context)
-    elif data == "buy_panel":
-        await buy_panel_menu(update, context)
-    elif data.startswith("panel_buy_"):
-        await panel_buy_cb(update, context)
-
-    # ====== بازی دو نفره ======
-    elif data.startswith("join_game_"):
-        await join_game_callback(update, context)
-    elif data.startswith("cancel_game_"):
-        await cancel_game_callback(update, context)
 
-    # ====== بازی انفجار ======
-    elif data.startswith("crash_out_"):
-        await crash_out_callback(update, context)
-
-    # ====== بازی تاس ======
-    elif data.startswith("dice_pick_"):
-        await dice_pick_callback(update, context)
-    elif data == "dice_roll":
-        await dice_roll_callback(update, context)
-    elif data == "dice_cancel":
-        await dice_cancel_callback(update, context)
-
-    # ====== بازی حدس بزن ======
-    elif data.startswith("guess_pick_"):
-        await guess_pick_callback(update, context)
-    elif data == "guess_confirm":
-        await guess_confirm_callback(update, context)
-    elif data == "guess_cancel":
-        await guess_cancel_callback(update, context)
-
-    # ====== بازی کازینو ======
-    elif data.startswith("casino_pick_"):
-        await casino_pick_callback(update, context)
-    elif data == "casino_spin":
-        await casino_spin_callback(update, context)
-    elif data == "casino_cancel":
-        await casino_cancel_callback(update, context)
-
-    # ====== بازی بمب ======
-    elif data.startswith("bomb_click_"):
-        await bomb_click_callback(update, context)
-    elif data == "bomb_cashout":
-        await bomb_cashout_callback(update, context)
-    elif data == "bomb_cancel":
-        await bomb_cancel_callback(update, context)
-
-    # ====== بازی فوتبال ======
-    elif data.startswith("football_pick_"):
-        await football_pick_callback(update, context)
-    elif data == "football_shoot":
-        await football_shoot_callback(update, context)
-    elif data == "football_cancel":
-        await football_cancel_callback(update, context)
-
-    # ====== ماینر ======
-    elif data.startswith("miner_buy_"):
-        await miner_buy_cb(update, context)
-    elif data.startswith("miner_charge_"):
-        await miner_charge_cb(update, context)
-    elif data.startswith("miner_start_ton_"):
-        await miner_start_cb(update, context)
-    elif data.startswith("miner_start_usdt_"):
-        await miner_start_cb(update, context)
-    elif data.startswith("miner_stop_"):
-        await miner_stop_cb(update, context)
-    elif data.startswith("miner_upgrade_"):
-        await miner_upgrade_cb(update, context)
-    elif data.startswith("miner_refresh_"):
-        await miner_refresh_cb(update, context)
-    elif data == "miner_no_electricity":
-        await miner_no_electricity_cb(update, context)
-    elif data == "miner_max_level":
-        await miner_max_level_cb(update, context)
-
-    # ====== بانک ======
-    elif data == "bank_open":
-        await bank_open_cb(update, context)
-    elif data == "bank_auto_card":
-        await bank_auto_card_cb(update, context)
-    elif data == "bank_custom_card":
-        await bank_custom_card_cb(update, context)
-    elif data == "bank_deposit":
-        await bank_deposit_cb(update, context)
-    elif data == "bank_withdraw":
-        await bank_withdraw_cb(update, context)
-    elif data == "bank_wait":
-        await bank_wait_cb(update, context)
-
-    # ====== کارخونه ======
-    elif data == "factory_open":
-        await factory_open_cb(update, context)
-    elif data == "factory_upgrade":
-        await factory_upgrade_cb(update, context)
-    elif data == "factory_collect":
-        await factory_collect_cb(update, context)
-    elif data == "factory_reactivate":
-        await factory_reactivate_cb(update, context)
-
-    # ====== جوین اجباری ======
-    elif data == "check_join_main":
-        await check_join_main(update, context)
-    elif data == "check_join_ref":
-        await check_join_ref_cb(update, context)
-
-    # ====== ادمین کالبک‌های ویژه ======
-    elif data.startswith("admin_send_config_"):
-        await admin_send_config_cb(update, context)
-    elif data.startswith("admin_reply_"):
-        await admin_reply_cb(update, context)
-    elif data.startswith("admin_confirm_stars_"):
-        await admin_confirm_stars_cb(update, context)
-    elif data.startswith("admin_confirm_gift_"):
-        await admin_confirm_gift_cb(update, context)
-    elif data.startswith("admin_approve_mission_"):
-        await admin_approve_mission_cb(update, context)
-    elif data.startswith("admin_reject_mission_"):
-        await admin_reject_mission_cb(update, context)
-
-    # ====== پنل ادمین ======
-    elif data.startswith("adm_"):
-        await admin_callbacks(update, context)
-
-
-# ============ CHAT MEMBER HANDLER ============
-
-async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ردیابی وضعیت ادمین بودن ربات"""
-    try:
-        chat = update.effective_chat
-        if chat.type not in ['group', 'supergroup']:
-            return
-
-        new_member = update.my_chat_member.new_chat_member
-        new_status = new_member.status
-
-        try:
-            count = await context.bot.get_chat_member_count(chat.id)
-        except Exception:
-            count = 0
-
-        if new_status in ['administrator', 'creator']:
-            db.add_or_update_group(chat.id, chat.title, count, 1)
-            logger.info(f"Bot became admin in {chat.title} ({chat.id})")
-        elif new_status in ['member', 'restricted']:
-            db.add_or_update_group(chat.id, chat.title, count, 0)
-        elif new_status in ['left', 'kicked']:
-            conn = db.get_conn()
-            c = conn.cursor()
-            c.execute("DELETE FROM groups WHERE chat_id = ?", (chat.id,))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.error(f"my_chat_member error: {e}")
-
-
-# ============ PERIODIC TASKS ============
-
-async def periodic_maintenance(context: ContextTypes.DEFAULT_TYPE):
-    """نگهداری خودکار"""
-    try:
-        conn = db.get_conn()
-        c = conn.cursor()
-        
-        # نگهداری کارخونه
-        c.execute("SELECT user_id FROM users WHERE factory_active = 1")
-        rows = c.fetchall()
-        conn.close()
-        for row in rows:
-            try:
-                db.factory_maintenance_due(row['user_id'])
-            except Exception:
-                pass
-        
-        # بروزرسانی ماینرها
-        conn = db.get_conn()
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM miners WHERE is_mining = 1")
-        mining_users = c.fetchall()
-        conn.close()
-        for row in mining_users:
-            try:
-                db.update_mining_balance(row['user_id'])
-            except Exception:
-                pass
-    except Exception as e:
-        logger.error(f"Maintenance error: {e}")
-
-
-async def check_bot_admin_in_all_groups(context: ContextTypes.DEFAULT_TYPE):
-    """بررسی ادمین بودن ربات"""
-    try:
-        groups = db.get_all_groups()
-        for g in groups:
-            try:
-                bot_member = await context.bot.get_chat_member(g['chat_id'], context.bot.id)
-                is_admin_status = 1 if bot_member.status in ['administrator', 'creator'] else 0
-                if g['is_admin'] != is_admin_status:
-                    db.update_group_admin_status(g['chat_id'], is_admin_status)
-            except Exception:
-                pass
-            await asyncio.sleep(0.2)
-    except Exception as e:
-        logger.error(f"Check admin status error: {e}")
-
-
-# ============ ERROR HANDLER ============
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Exception:", exc_info=context.error)
-
-
-# ============ COMMANDS ============
-
-async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("✅ همه عملیات‌ها لغو شد.")
-
-
-async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور /backup برای بکاپ"""
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("❌ دسترسی ندارید!")
+    # ── لیدربورد ──
+    if text in ('لیدربورد', '/leaderboard'):
+        await cmd_leaderboard_group(update, ctx)
         return
 
-    try:
-        await update.message.reply_text("⏳ آماده‌سازی بکاپ...")
-        with open(db.db_name, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=user.id,
-                document=f,
-                filename=f"darkpoint_backup_{int(time.time())}.db",
-                caption=(
-                    f"💾 <b>بکاپ کامل دیتابیس</b>\n\n"
-                    f"📅 {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"👥 کاربران: {db.get_all_users_count()}\n"
-                    f"💎 کل DP: {format_number(db.get_stats()['total_dp'])}"
-                ),
-                parse_mode=ParseMode.HTML
-            )
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا:\n{str(e)[:200]}")
-
-
-async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور /restore برای شروع بازگردانی"""
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("❌ دسترسی ندارید!")
+    # ── ایدی عددی (admin only, reply) ──
+    if text in ('ایدی عددی', '/id'):
+        await cmd_id_group(update, ctx)
         return
-
-    context.user_data['admin_action'] = 'restore_db'
-    await update.message.reply_text(
-        f"🔄 <b>بازگردانی بکاپ</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"📥 فایل بکاپ (<code>.db</code>) را به صورت Document ارسال کنید.\n\n"
-        f"⚠️ تمام اطلاعات فعلی جایگزین می‌شود.\n"
-        f"✅ بکاپ ایمنی خودکار گرفته می‌شود.\n\n"
-        f"برای لغو: /cancel",
-        parse_mode=ParseMode.HTML
-    )
 
 
-# ============ MAIN FUNCTION ============
+# ══════════════════════════════════════════════
+#     🚀 MAIN FUNCTION
+# ══════════════════════════════════════════════
 
 def main():
-    """راه‌اندازی ربات"""
-    start_health_server()
+    """Initialize and run the Dark Point Bot"""
 
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_error_handler(error_handler)
+    logger.info("🌑 Dark Point Bot starting...")
+    logger.info(f"📁 Data dir: {config.DATA_DIR}")
+    logger.info(f"💾 DB path: {config.DB_PATH}")
 
-    # Commands
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(CommandHandler("cancel", cancel_cmd))
-    application.add_handler(CommandHandler("backup", backup_cmd))
-    application.add_handler(CommandHandler("restore", restore_cmd))
+    # ── Start background threads ──
+    # Health server (for Render)
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    logger.info(f"🌐 Health server started on port {config.PORT}")
 
-    # Callback Query
-    application.add_handler(CallbackQueryHandler(callback_router))
+    # Self-ping (keep Render alive)
+    if config.RENDER_URL:
+        ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
+        ping_thread.start()
+        logger.info(f"🔄 Self-ping enabled: {config.RENDER_URL}")
 
-    # Group messages
-    application.add_handler(MessageHandler(
-        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
-        handle_group_message
-    ))
+    # ── Build Application ──
+    app = (
+        ApplicationBuilder()
+        .token(config.BOT_TOKEN)
+        .concurrent_updates(True)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
 
-    # Private messages (پشتیبانی از همه نوع برای ادمین)
-    application.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & ~filters.COMMAND,
-        handle_private_message
-    ))
+    # ══════════════════════════════════════════
+    #         HANDLER REGISTRATION
+    # ══════════════════════════════════════════
 
-    # New chat members
-    application.add_handler(MessageHandler(
-        filters.StatusUpdate.NEW_CHAT_MEMBERS,
-        on_new_chat_members
-    ))
+    # ── 1. Command Handlers (Private & Group) ──
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("backup", cmd_backup))
+    app.add_handler(CommandHandler("sendconfig", cmd_send_config))
+    app.add_handler(CommandHandler("restore", cmd_backup))  # /restore triggers backup flow
 
-    # ChatMember handler برای ردیابی ادمین بودن
-    application.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
+    # ── 2. Chat Member Handler (bot added/removed from groups) ──
+    app.add_handler(ChatMemberHandler(on_chat_member_update,
+                                      ChatMemberHandler.MY_CHAT_MEMBER))
 
-    # Jobs
-    application.job_queue.run_repeating(periodic_maintenance, interval=300, first=30)
-    application.job_queue.run_repeating(self_ping, interval=480, first=60)
-    application.job_queue.run_repeating(check_bot_admin_in_all_groups, interval=1800, first=120)
+    # ── 3. Callback Query Handler (ALL inline buttons) ──
+    # Single catch-all router handles every callback
+    app.add_handler(CallbackQueryHandler(main_callback_router))
 
-    print("🏴 Dark Point Bot Ultimate Final Version is running!")
-    print(f"✅ Admin IDs: {ADMIN_IDS}")
-    print(f"✅ Log Channel: {LOG_CHANNEL_ID}")
-    print(f"✅ Database: {db.db_name}")
-    logger.info("Bot started successfully")
+    # ── 4. Media Handlers (Private — photos & documents) ──
+    app.add_handler(MessageHandler(
+        filters.PHOTO & filters.ChatType.PRIVATE,
+        user_photo_handler))
+    app.add_handler(MessageHandler(
+        filters.Document.ALL & filters.ChatType.PRIVATE,
+        user_document_handler))
 
-    application.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    # ── 5. Text Handlers ──
+    # Group text commands (Persian)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUP,
+        group_text_handler))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.SUPERGROUP,
+        group_text_handler))
+
+    # Private text messages (main user router — MUST be last text handler)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        user_text_router))
+
+    # ══════════════════════════════════════════
+    #         JOB QUEUE (Scheduled Tasks)
+    # ══════════════════════════════════════════
+
+    job_queue = app.job_queue
+
+    # Group member count check — every 6 hours
+    job_queue.run_repeating(
+        check_group_members_job,
+        interval=21600,   # 6 hours
+        first=300,        # 5 min after start
+        name="group_check"
+    )
+
+    # Game timeout cleanup — every 5 minutes
+    job_queue.run_repeating(
+        cleanup_game_timeouts,
+        interval=300,
+        first=60,
+        name="game_cleanup"
+    )
+
+    # Daily transfer counter reset — every 24 hours
+    async def reset_daily_counters(ctx):
+        c = db.conn.cursor()
+        today = date.today().isoformat()
+        c.execute(
+            'UPDATE users SET transfer_count_today=0 WHERE transfer_reset_date!=?',
+            (today,))
+        c.execute(
+            'UPDATE users SET wheel_used_today=0 WHERE wheel_reset_date!=?',
+            (today,))
+        db.conn.commit()
+        logger.info("🔄 Daily counters reset")
+
+    job_queue.run_repeating(
+        reset_daily_counters,
+        interval=86400,   # 24 hours
+        first=60,
+        name="daily_reset"
+    )
+
+    # ══════════════════════════════════════════
+    #         START BOT
+    # ══════════════════════════════════════════
+
+    logger.info("✅ All handlers registered")
+    logger.info("🚀 Starting polling...")
+
+    # Set bot commands menu
+    async def post_init(application):
+        try:
+            await application.bot.set_my_commands([
+                ("start", "شروع ربات"),
+                ("help", "راهنما"),
+                ("admin", "پنل مدیریت"),
+                ("backup", "بکاپ دیتابیس"),
+            ])
+            logger.info("✅ Bot commands set")
+        except Exception as e:
+            logger.warning(f"Set commands err: {e}")
+
+    app.post_init = post_init
+
+    # Run with polling
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        stop_signals=None,  # Let Render handle shutdown
+    )
 
 
-if __name__ == '__main__':
+# ══════════════════════════════════════════════
+#     🎯 ENTRY POINT
+# ══════════════════════════════════════════════
+
+if __name__ == "__main__":
     main()
