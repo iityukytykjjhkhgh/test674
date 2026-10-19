@@ -1,4 +1,3 @@
-# bot.py — Dark Point Bot (قسمت 1/12) — Glass Buttons Edition
 import os
 import sys
 import time
@@ -351,10 +350,7 @@ def back_only_kb(callback="back_main"):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 بازگشت", callback_data=callback)]
     ])# ═══════════════════════════════════════════════════════════
-#  SECTION 2/12 — /start, Welcome, Force Join, Main Menu, Cancel
-# ═══════════════════════════════════════════════════════════
 
-# ── /start ──────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ورود کاربر — ثبت‌نام + چک فورس‌جوین + نمایش منو"""
     user = update.effective_user
@@ -543,8 +539,8 @@ async def cb_main_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_convert_menu(update, context)
     elif data == "menu_panel":
         await handle_panel(update, context)# ═══════════════════════════════════════════════════════════
-#  SECTION 3/12 — Profile, Claim, Referral, Leaderboard, Wheel
-# ═══════════════════════════════════════════════════════════
+
+
 
 import random
 from datetime import datetime, timedelta
@@ -776,8 +772,8 @@ async def handle_wheel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔄 فردا دوباره رایگان بزن!"
     )
     await safe_edit(update, text, reply_markup=back_to_main_kb())# ═══════════════════════════════════════════════════════════
-#  SECTION 4/12 — Group Games (Crash, Dice, Guess, Casino, Bomb)
-# ═══════════════════════════════════════════════════════════
+
+
 
 import random
 from datetime import datetime
