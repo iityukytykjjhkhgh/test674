@@ -3464,7 +3464,7 @@ async def cmd_reject_task(update: Update,
 
 ### 📌 متدهای دیتابیس مورد نیاز
 
-```python
+
 # ── گروه‌ها ──
 def add_group(self, chat_id, title, members):
     self.conn.execute(
@@ -3484,7 +3484,7 @@ def get_all_groups(self):
 
 ### 📌 جدول (در `_migrate`)
 
-```python
+
 self.conn.execute("""
     CREATE TABLE IF NOT EXISTS groups (
         chat_id INTEGER PRIMARY KEY,
