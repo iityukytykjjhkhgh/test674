@@ -3460,7 +3460,7 @@ async def cmd_reject_task(update: Update,
     await safe_send(update, f"❌ ماموریت برای {uid} رد شد.")
 
 
----
+
 
 ### 📌 متدهای دیتابیس مورد نیاز
 
@@ -3493,9 +3493,9 @@ self.conn.execute("""
         joined_at TEXT
     )
 """)
-```
 
----
+
+
 
 
 import io
