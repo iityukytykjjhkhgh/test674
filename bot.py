@@ -3458,7 +3458,7 @@ async def cmd_reject_task(update: Update,
     except Exception:
         pass
     await safe_send(update, f"❌ ماموریت برای {uid} رد شد.")
-```
+
 
 ---
 
