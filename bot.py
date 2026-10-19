@@ -2926,10 +2926,7 @@ async def msg_buydp_receipt(update: Update,
         "⏳ پس از تأیید ادمین، DP واریز می‌شود."
     ), reply_markup=back_to_main_kb())## 📦 بخش 8/12 — پنل DP، دستورات گروهی، افزودن به گروه
 
-```python
-# ═══════════════════════════════════════════════════════════
-#  SECTION 8/12 — DP Panel, Group Commands, Add to Group
-# ═══════════════════════════════════════════════════════════
+
 
 from datetime import datetime
 
