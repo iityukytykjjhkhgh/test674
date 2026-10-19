@@ -3501,11 +3501,6 @@ self.conn.execute("""
 ---
 
 
-بگو **«ادامه»** تا بخش 9/12 (ادمین بخش اول: آمار، پخش، اضافه/کسر DP، جستجو، بن، بکاپ) را بفرستم.# ═══════════════════════════════════════════════════════════
-#  SECTION 9/12 — Admin Panel Part 1
-#  Stats, Broadcast, Add/Deduct DP, Search, Ban, Backup
-# ═══════════════════════════════════════════════════════════
-
 import io
 import shutil
 from datetime import datetime
