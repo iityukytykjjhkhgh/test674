@@ -1,1025 +1,1403 @@
-# ═══════════════════════════════════════════════════════════
-#  database.py — Dark Point Bot Database
-#  SECTION 1/3 — Imports, Schema, Users, Level, Settings
-# ═══════════════════════════════════════════════════════════
+# database.py - Database Manager Ultimate Version
 
 import os
 import sqlite3
-import logging
-from datetime import datetime
-import config
-
-logger = logging.getLogger(__name__)
-
+import time
+import random
+import string
+import threading
 
 class Database:
-    """کلاس اصلی دیتابیس دارک پوینت"""
-
     def __init__(self):
-        # مسیر دیتابیس (Render Persistent Disk)
-        data_dir = os.environ.get("DATA_DIR", ".")
-        os.makedirs(data_dir, exist_ok=True)
-        self.db_path = os.path.join(data_dir, "bot.db")
+        # استفاده از دیسک دائمی رندر
+        data_dir = os.environ.get('DATA_DIR', '/var/data')
+        
+        if not os.path.exists(data_dir):
+            try:
+                os.makedirs(data_dir, exist_ok=True)
+            except Exception:
+                data_dir = '.'
 
-        logger.info(f"📁 Data dir: {data_dir}")
-        logger.info(f"💾 DB path: {self.db_path}")
+        self.db_name = os.path.join(data_dir, "darkpoint.db")
+        print(f"📁 Database connected at: {self.db_name}")
+        self.lock = threading.Lock()
+        self.init_db()
 
-        # اتصال
-        self.conn = sqlite3.connect(
-            self.db_path,
-            check_same_thread=False,
-            isolation_level=None,  # autocommit
-        )
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
+    def get_conn(self):
+        conn = sqlite3.connect(self.db_name, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-        # ساخت جداول و مهاجرت
-        self._create_tables()
-        self._migrate()
+    def init_db(self):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
 
-        logger.info("✅ Database initialized")
-
-    # ══════════════════════════════════════════════════════
-    #  ساخت جداول اولیه
-    # ══════════════════════════════════════════════════════
-    def _create_tables(self):
-        """ساخت تمام جداول اگر وجود نداشته باشند"""
-
-        # ── کاربران ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
+            # ============ USERS TABLE ============
+            c.execute('''CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT DEFAULT '',
                 first_name TEXT DEFAULT '',
-                balance INTEGER DEFAULT 0,
+                dark_points INTEGER DEFAULT 0,
+                total_earned INTEGER DEFAULT 0,
                 level INTEGER DEFAULT 1,
-                referred_by INTEGER DEFAULT 0,
-                banned INTEGER DEFAULT 0,
-                joined_at TEXT,
-                last_claim INTEGER DEFAULT 0,
-                claim_cooldown INTEGER DEFAULT 0,
-                last_wheel INTEGER DEFAULT 0,
+                referrer_id INTEGER DEFAULT 0,
+                referral_count INTEGER DEFAULT 0,
+                last_claim_time REAL DEFAULT 0,
+                last_cooldown INTEGER DEFAULT 0,
+                joined_channels INTEGER DEFAULT 0,
+                captcha_verified INTEGER DEFAULT 0,
+                created_at REAL DEFAULT 0,
+                like_challenge_active INTEGER DEFAULT 0,
+                like_challenge_until REAL DEFAULT 0,
+                factory_level INTEGER DEFAULT 0,
+                factory_active INTEGER DEFAULT 0,
+                factory_last_collect REAL DEFAULT 0,
+                factory_last_maintenance REAL DEFAULT 0,
+                bank_account INTEGER DEFAULT 0,
+                bank_card TEXT DEFAULT '',
                 bank_balance INTEGER DEFAULT 0,
-                bank_lock_until INTEGER DEFAULT 0,
-                bank_last_interest INTEGER DEFAULT 0,
-                miner_level INTEGER DEFAULT 0,
-                miner_currency TEXT DEFAULT 'ton',
-                miner_last_collect INTEGER DEFAULT 0,
-                ton_balance REAL DEFAULT 0.0,
-                usdt_balance REAL DEFAULT 0.0,
-                factory_level INTEGER DEFAULT 1,
-                factory_last_collect INTEGER DEFAULT 0
-            )
-        """)
+                bank_deposit_time REAL DEFAULT 0,
+                bank_interest_collected INTEGER DEFAULT 0,
+                bought_dp INTEGER DEFAULT 0,
+                is_banned INTEGER DEFAULT 0,
+                crash_games_played INTEGER DEFAULT 0,
+                crash_games_won INTEGER DEFAULT 0,
+                last_active REAL DEFAULT 0,
+                first_reward_claimed INTEGER DEFAULT 0,
+                last_wheel_spin REAL DEFAULT 0,
+                completed_tasks TEXT DEFAULT '',
+                transfer_count_today INTEGER DEFAULT 0,
+                last_transfer_day REAL DEFAULT 0
+            )''')
 
-        # ── تنظیمات ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+            # Auto-Migration USERS
+            c.execute("PRAGMA table_info(users)")
+            existing_cols = [row[1] for row in c.fetchall()]
+            needed_cols = {
+                'is_banned': 'INTEGER DEFAULT 0',
+                'crash_games_played': 'INTEGER DEFAULT 0',
+                'crash_games_won': 'INTEGER DEFAULT 0',
+                'last_active': 'REAL DEFAULT 0',
+                'first_reward_claimed': 'INTEGER DEFAULT 0',
+                'last_wheel_spin': 'REAL DEFAULT 0',
+                'completed_tasks': "TEXT DEFAULT ''",
+                'transfer_count_today': 'INTEGER DEFAULT 0',
+                'last_transfer_day': 'REAL DEFAULT 0',
+                'dark_points': 'INTEGER DEFAULT 0',
+                'total_earned': 'INTEGER DEFAULT 0',
+                'level': 'INTEGER DEFAULT 1',
+                'bank_balance': 'INTEGER DEFAULT 0',
+                'bank_account': 'INTEGER DEFAULT 0',
+                'bank_card': "TEXT DEFAULT ''",
+                'bank_deposit_time': 'REAL DEFAULT 0',
+                'bank_interest_collected': 'INTEGER DEFAULT 0',
+                'factory_level': 'INTEGER DEFAULT 0',
+                'factory_active': 'INTEGER DEFAULT 0',
+                'factory_last_collect': 'REAL DEFAULT 0',
+                'factory_last_maintenance': 'REAL DEFAULT 0',
+                'like_challenge_active': 'INTEGER DEFAULT 0',
+                'like_challenge_until': 'REAL DEFAULT 0',
+                'bought_dp': 'INTEGER DEFAULT 0',
+                'referral_count': 'INTEGER DEFAULT 0',
+                'last_claim_time': 'REAL DEFAULT 0',
+                'last_cooldown': 'INTEGER DEFAULT 0',
+            }
+            for col, col_type in needed_cols.items():
+                if col not in existing_cols:
+                    try:
+                        c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+                    except Exception:
+                        pass
 
-        # ── گروه‌ها ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS groups (
-                chat_id INTEGER PRIMARY KEY,
-                title TEXT,
-                members INTEGER DEFAULT 0,
-                joined_at TEXT
-            )
-        """)
+            # ============ GAMES ============
+            c.execute('''CREATE TABLE IF NOT EXISTS games (
+                game_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_id INTEGER,
+                amount INTEGER,
+                status TEXT DEFAULT 'waiting',
+                joiner_id INTEGER DEFAULT 0,
+                winner_id INTEGER DEFAULT 0,
+                loser_id INTEGER DEFAULT 0,
+                chat_id INTEGER,
+                message_id INTEGER,
+                created_at REAL DEFAULT 0
+            )''')
 
-        # ── انتقال‌ها ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS transfers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sender_id INTEGER,
-                date TEXT
-            )
-        """)
+            c.execute('''CREATE TABLE IF NOT EXISTS crash_games (
+                game_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                bet_amount INTEGER,
+                crash_point REAL,
+                cashed_out REAL DEFAULT 0,
+                profit INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'playing',
+                chat_id INTEGER,
+                message_id INTEGER,
+                created_at REAL DEFAULT 0
+            )''')
 
-        # ── برداشت TON ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS ton_withdrawals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                wallet TEXT NOT NULL,
-                ton_amount REAL NOT NULL,
-                dp_cost INTEGER NOT NULL,
+            c.execute('''CREATE TABLE IF NOT EXISTS transfers (
+                transfer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_id INTEGER,
+                to_id INTEGER,
+                amount INTEGER,
+                fee INTEGER,
+                created_at REAL DEFAULT 0
+            )''')
+
+            # ============ ORDERS ============
+            c.execute('''CREATE TABLE IF NOT EXISTS panel_orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                plan_name TEXT,
+                price INTEGER,
                 status TEXT DEFAULT 'pending',
-                created_at TEXT,
-                processed_at TEXT
-            )
-        """)
+                config_data TEXT DEFAULT '',
+                created_at REAL DEFAULT 0
+            )''')
 
-        # ── فروشگاه ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS shop_plans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                price INTEGER DEFAULT 0,
-                stock INTEGER DEFAULT 0,
-                content TEXT DEFAULT '',
-                file_id TEXT DEFAULT '',
-                file_type TEXT DEFAULT '',
-                active INTEGER DEFAULT 1
-            )
-        """)
-
-        # ── پلن‌های هدیه ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS gift_plans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                price INTEGER DEFAULT 0,
-                active INTEGER DEFAULT 1
-            )
-        """)
-
-        # ── ماموریت‌ها ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                type TEXT DEFAULT 'channel',
-                reward INTEGER DEFAULT 0,
-                link TEXT DEFAULT '',
-                channel_id TEXT DEFAULT '',
-                active INTEGER DEFAULT 1
-            )
-        """)
-
-        # ── ماموریت‌های انجام‌شده کاربر ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_tasks (
+            c.execute('''CREATE TABLE IF NOT EXISTS gift_orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                task_id INTEGER,
-                completed_at TEXT,
-                UNIQUE(user_id, task_id)
-            )
-        """)
+                gift_type TEXT,
+                price INTEGER,
+                status TEXT DEFAULT 'pending',
+                created_at REAL DEFAULT 0
+            )''')
 
-        # ── لایک چلنج ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS like_challenges (
-                user_id INTEGER PRIMARY KEY,
-                end_date TEXT,
-                active INTEGER DEFAULT 1
-            )
-        """)
-
-        # ── فورس‌جوین ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS force_join (
-                channel_id TEXT PRIMARY KEY,
-                title TEXT
-            )
-        """)
-
-        # ── سفارشات ستاره ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS star_orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            c.execute('''CREATE TABLE IF NOT EXISTS stars_orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
+                target_id TEXT,
+                target_type TEXT DEFAULT 'self',
                 amount INTEGER,
                 dp_cost INTEGER,
                 status TEXT DEFAULT 'pending',
-                created_at TEXT
-            )
-        """)
+                created_at REAL DEFAULT 0
+            )''')
 
-        # ── سفارشات خرید DP ──
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS buy_dp_orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                dp_amount INTEGER,
+            # ============ SETTINGS ============
+            c.execute('''CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )''')
+
+            c.execute('''CREATE TABLE IF NOT EXISTS custom_panels (
+                panel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                description TEXT,
                 price INTEGER,
-                status TEXT DEFAULT 'pending',
-                created_at TEXT
-            )
-        """)
+                data_limit TEXT,
+                active INTEGER DEFAULT 1,
+                created_at REAL DEFAULT 0
+            )''')
 
-    # ══════════════════════════════════════════════════════
-    #  مهاجرت (Migration) — ALTER جدید‌ترین ستون‌ها
-    # ══════════════════════════════════════════════════════
-    def _migrate(self):
-        """
-        افزودن ستون‌های جدید به جدول users اگر وجود نداشته باشند.
-        اجرای بی‌خطر — در صورت وجود ستون، نادیده می‌گیرد.
-        """
-        new_columns = [
-            ("username", "TEXT DEFAULT ''"),
-            ("first_name", "TEXT DEFAULT ''"),
-            ("balance", "INTEGER DEFAULT 0"),
-            ("level", "INTEGER DEFAULT 1"),
-            ("referred_by", "INTEGER DEFAULT 0"),
-            ("banned", "INTEGER DEFAULT 0"),
-            ("joined_at", "TEXT"),
-            ("last_claim", "INTEGER DEFAULT 0"),
-            ("claim_cooldown", "INTEGER DEFAULT 0"),
-            ("last_wheel", "INTEGER DEFAULT 0"),
-            ("bank_balance", "INTEGER DEFAULT 0"),
-            ("bank_lock_until", "INTEGER DEFAULT 0"),
-            ("bank_last_interest", "INTEGER DEFAULT 0"),
-            ("miner_level", "INTEGER DEFAULT 0"),
-            ("miner_currency", "TEXT DEFAULT 'ton'"),
-            ("miner_last_collect", "INTEGER DEFAULT 0"),
-            ("ton_balance", "REAL DEFAULT 0.0"),
-            ("usdt_balance", "REAL DEFAULT 0.0"),
-            ("factory_level", "INTEGER DEFAULT 1"),
-            ("factory_last_collect", "INTEGER DEFAULT 0"),
-        ]
+            c.execute('''CREATE TABLE IF NOT EXISTS checks (
+                check_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE,
+                amount INTEGER,
+                claimed INTEGER DEFAULT 0,
+                claimed_by INTEGER DEFAULT 0,
+                created_at REAL DEFAULT 0
+            )''')
 
-        # گرفتن ستون‌های موجود
-        try:
-            existing = [
-                row[1] for row in
-                self.conn.execute("PRAGMA table_info(users)").fetchall()
-            ]
-        except Exception:
-            existing = []
+            c.execute('''CREATE TABLE IF NOT EXISTS bank_cards (
+                card_number TEXT PRIMARY KEY,
+                user_id INTEGER
+            )''')
 
-        # افزودن ستون‌های جدید
-        for col, typ in new_columns:
-            if col not in existing:
+            # ============ GROUPS ============
+            c.execute('''CREATE TABLE IF NOT EXISTS groups (
+                chat_id INTEGER PRIMARY KEY,
+                title TEXT DEFAULT '',
+                member_count INTEGER DEFAULT 0,
+                bot_active INTEGER DEFAULT 1,
+                is_admin INTEGER DEFAULT 0,
+                added_at REAL DEFAULT 0
+            )''')
+
+            c.execute("PRAGMA table_info(groups)")
+            group_cols = [row[1] for row in c.fetchall()]
+            if 'is_admin' not in group_cols:
                 try:
-                    self.conn.execute(
-                        f"ALTER TABLE users ADD COLUMN {col} {typ}"
-                    )
-                    logger.info(f"✅ Added column: users.{col}")
-                except Exception as e:
-                    logger.debug(f"⚠️ Column {col} skip: {e}")
+                    c.execute("ALTER TABLE groups ADD COLUMN is_admin INTEGER DEFAULT 0")
+                except Exception:
+                    pass
 
-        # مقادیر پیش‌فرض تنظیمات
-        defaults = {
-            "bot_on": "1",
-            "buy_dp_amount": str(config.BUY_DP_DEFAULT_AMOUNT),
-            "buy_dp_price": str(config.BUY_DP_DEFAULT_PRICE),
-            "referral_reward": str(config.DEFAULT_REFERRAL_REWARD),
-            "first_join_reward": str(config.DEFAULT_FIRST_JOIN_REWARD),
-            "stars_amount": "50",
-            "stars_on": "1",
-            # 15 بخش قابل toggle (همه روشن به صورت پیش‌فرض)
-            "sec_ton_withdraw": "1",
-            "sec_buy_dp": "1",
-            "sec_gift": "1",
-            "sec_shop": "1",
-            "sec_stars": "1",
-            "sec_wheel": "1",
-            "sec_bank": "1",
-            "sec_claim": "1",
-            "sec_referral": "1",
-            "sec_tasks": "1",
-            "sec_like": "1",
-            "sec_convert": "1",
-            "sec_panel": "1",
-            # بازی‌ها و سیستم‌های گروهی
-            "sec_crash": "1",
-            "sec_dice": "1",
-            "sec_guess": "1",
-            "sec_casino": "1",
-            "sec_bomb": "1",
-            "sec_miner": "1",
-            "sec_factory": "1",
-            "sec_transfer": "1",
-        }
-        for key, val in defaults.items():
-            try:
-                existing_val = self.conn.execute(
-                    "SELECT value FROM settings WHERE key=?", (key,)
-                ).fetchone()
-                if not existing_val:
-                    self.conn.execute(
-                        "INSERT INTO settings (key, value) VALUES (?,?)",
-                        (key, val)
-                    )
-            except Exception as e:
-                logger.debug(f"⚠️ Setting {key}: {e}")
+            c.execute('''CREATE TABLE IF NOT EXISTS force_channels (
+                channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_username TEXT UNIQUE,
+                channel_title TEXT DEFAULT '',
+                active INTEGER DEFAULT 1,
+                added_at REAL DEFAULT 0
+            )''')
 
-        logger.info("✅ Migration completed")
+            # ============ TASKS ============
+            c.execute('''CREATE TABLE IF NOT EXISTS tasks (
+                task_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_type TEXT DEFAULT 'channel',
+                channel_username TEXT DEFAULT '',
+                channel_title TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                reward INTEGER DEFAULT 0,
+                capacity INTEGER DEFAULT 0,
+                completed_count INTEGER DEFAULT 0,
+                active INTEGER DEFAULT 1,
+                created_at REAL DEFAULT 0
+            )''')
 
-    # ══════════════════════════════════════════════════════
-    #  کاربران
-    # ══════════════════════════════════════════════════════
-    def add_user(self, user_id, username="", first_name="", referred_by=None):
-        """ثبت کاربر جدید + جایزه ریفرال"""
-        # چک وجود کاربر
-        c = self.conn.execute(
-            "SELECT user_id FROM users WHERE user_id=?", (user_id,)
-        )
-        if c.fetchone():
-            # کاربر موجود — فقط آپدیت نام و یوزرنیم
-            self.conn.execute(
-                "UPDATE users SET username=?, first_name=? WHERE user_id=?",
-                (username, first_name, user_id)
-            )
-            return False
+            c.execute("PRAGMA table_info(tasks)")
+            task_cols = [row[1] for row in c.fetchall()]
+            if 'task_type' not in task_cols:
+                try: c.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'channel'")
+                except: pass
+            if 'description' not in task_cols:
+                try: c.execute("ALTER TABLE tasks ADD COLUMN description TEXT DEFAULT ''")
+                except: pass
+            if 'capacity' not in task_cols:
+                try: c.execute("ALTER TABLE tasks ADD COLUMN capacity INTEGER DEFAULT 0")
+                except: pass
+            if 'completed_count' not in task_cols:
+                try: c.execute("ALTER TABLE tasks ADD COLUMN completed_count INTEGER DEFAULT 0")
+                except: pass
 
-        # کاربر جدید
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            c.execute('''CREATE TABLE IF NOT EXISTS mission_requests (
+                request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                task_id INTEGER,
+                status TEXT DEFAULT 'pending',
+                admin_note TEXT DEFAULT '',
+                created_at REAL DEFAULT 0
+            )''')
 
-        # جایزه عضویت اول
-        first_join = int(self.get_setting(
-            "first_join_reward",
-            str(config.DEFAULT_FIRST_JOIN_REWARD)
-        ))
+            c.execute('''CREATE TABLE IF NOT EXISTS broadcast_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER,
+                message_type TEXT,
+                total_users INTEGER,
+                sent_count INTEGER,
+                failed_count INTEGER,
+                created_at REAL DEFAULT 0
+            )''')
 
-        ref_id = referred_by if referred_by else 0
+            # ============ MINER ============
+            c.execute('''CREATE TABLE IF NOT EXISTS miners (
+                user_id INTEGER PRIMARY KEY,
+                miner_level INTEGER DEFAULT 0,
+                is_mining INTEGER DEFAULT 0,
+                mining_currency TEXT DEFAULT '',
+                electricity_hours REAL DEFAULT 0,
+                last_mining_start REAL DEFAULT 0,
+                last_update_time REAL DEFAULT 0,
+                ton_balance REAL DEFAULT 0,
+                usdt_balance REAL DEFAULT 0,
+                total_ton_mined REAL DEFAULT 0,
+                total_usdt_mined REAL DEFAULT 0,
+                total_ton_converted REAL DEFAULT 0,
+                total_usdt_converted REAL DEFAULT 0,
+                created_at REAL DEFAULT 0
+            )''')
 
-        self.conn.execute("""
-            INSERT INTO users
-            (user_id, username, first_name, balance, level,
-             referred_by, joined_at)
-            VALUES (?, ?, ?, ?, 1, ?, ?)
-        """, (user_id, username, first_name, first_join, ref_id, now))
+            # ============ SHOP ============
+            c.execute('''CREATE TABLE IF NOT EXISTS shop_plans (
+                plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                description TEXT DEFAULT '',
+                price INTEGER,
+                content_type TEXT DEFAULT 'text',
+                content_data TEXT DEFAULT '',
+                content_file_id TEXT DEFAULT '',
+                stock INTEGER DEFAULT -1,
+                sold_count INTEGER DEFAULT 0,
+                active INTEGER DEFAULT 1,
+                created_at REAL DEFAULT 0
+            )''')
 
-        # جایزه ریفرال
-        if ref_id:
-            ref_reward = int(self.get_setting(
-                "referral_reward",
-                str(config.DEFAULT_REFERRAL_REWARD)
-            ))
-            self.add_balance(ref_id, ref_reward)
-            logger.info(f"🤝 Referral: {ref_id} +{ref_reward} DP from {user_id}")
+            c.execute('''CREATE TABLE IF NOT EXISTS shop_orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                plan_id INTEGER,
+                plan_name TEXT,
+                price INTEGER,
+                created_at REAL DEFAULT 0
+            )''')
 
-        return True
+            # ============ CURRENCY CONVERSIONS ============
+            c.execute('''CREATE TABLE IF NOT EXISTS currency_conversions (
+                conversion_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                currency TEXT,
+                amount REAL,
+                dp_received INTEGER,
+                created_at REAL DEFAULT 0
+            )''')
 
+            # ============ DEFAULT SETTINGS ============
+            default_settings = {
+                'gift_teddy_price': '750000',
+                'gift_section_active': '1',
+                'stars_section_active': '1',
+                'stars_price': '1000000',
+                'buy_dp_active': '1',
+                'buy_dp_amount': '500000',
+                'buy_dp_price_toman': '50000',
+                'crash_active': '1',
+                'dice_active': '1',
+                'guess_active': '1',
+                'casino_active': '1',
+                'bomb_active': '1',
+                'wheel_active': '1',
+                'football_active': '1',
+                'referral_reward': '30000',
+                'first_join_reward': '50000',
+                'tasks_active': '1',
+                'buy_panel_active': '1',
+                'bot_active': '1',
+                'miner_active': '1',
+                'shop_active': '1',
+                'convert_active': '1',
+            }
+
+            for key, value in default_settings.items():
+                c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+            conn.commit()
+            conn.close()    # ============ USER METHODS ============
     def get_user(self, user_id):
-        """دریافت اطلاعات کامل کاربر"""
-        c = self.conn.execute(
-            "SELECT * FROM users WHERE user_id=?", (user_id,)
-        )
-        row = c.fetchone()
-        return dict(row) if row else None
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = c.fetchone()
+        conn.close()
+        return user
 
-    def get_user_by_username(self, username):
-        """جستجوی کاربر بر اساس یوزرنیم"""
-        c = self.conn.execute(
-            "SELECT * FROM users WHERE username=? COLLATE NOCASE",
-            (username,)
-        )
-        row = c.fetchone()
-        return dict(row) if row else None
+    def create_user(self, user_id, username="", first_name="", referrer_id=0):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT OR IGNORE INTO users 
+                (user_id, username, first_name, referrer_id, created_at, last_active) 
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (user_id, username or "", first_name or "", referrer_id, time.time(), time.time()))
+            conn.commit()
+            conn.close()
 
-    def add_balance(self, user_id, amount):
-        """
-        اضافه (یا کسر با مقدار منفی) DP از موجودی کاربر.
-        خودکار سطح را بروزرسانی می‌کند.
-        """
-        self.conn.execute(
-            "UPDATE users SET balance = balance + ? WHERE user_id=?",
-            (amount, user_id)
-        )
-        # بروزرسانی سطح
-        self._update_level(user_id)
+    def update_user(self, user_id, **kwargs):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            sets = ", ".join([f"{k} = ?" for k in kwargs.keys()])
+            vals = list(kwargs.values()) + [user_id]
+            c.execute(f"UPDATE users SET {sets} WHERE user_id = ?", vals)
+            conn.commit()
+            conn.close()
 
-    def set_balance(self, user_id, amount):
-        """تنظیم موجودی به مقدار دقیق"""
-        self.conn.execute(
-            "UPDATE users SET balance=? WHERE user_id=?",
-            (amount, user_id)
-        )
-        self._update_level(user_id)
+    def update_last_active(self, user_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE users SET last_active = ? WHERE user_id = ?", (time.time(), user_id))
+            conn.commit()
+            conn.close()
 
-    def set_ban(self, user_id, status):
-        """بن یا آنبن کردن کاربر"""
-        self.conn.execute(
-            "UPDATE users SET banned=? WHERE user_id=?",
-            (status, user_id)
-        )
+    def add_dark_points(self, user_id, amount):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE users SET dark_points = dark_points + ?, total_earned = total_earned + ? WHERE user_id = ?",
+                      (amount, max(amount, 0), user_id))
+            conn.commit()
+            conn.close()
 
-    # ══════════════════════════════════════════════════════
-    #  سیستم سطح‌بندی (20 سطح)
-    # ══════════════════════════════════════════════════════
-    def _update_level(self, user_id):
-        """
-        بروزرسانی خودکار سطح کاربر بر اساس موجودی.
-        در صورت ارتقا، جایزه سطح × 1,000,000 اضافه می‌شود.
-        """
-        u = self.conn.execute(
-            "SELECT balance, level FROM users WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-        if not u:
-            return
+    def remove_dark_points(self, user_id, amount):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE users SET dark_points = dark_points - ? WHERE user_id = ? AND dark_points >= ?",
+                      (amount, user_id, amount))
+            affected = c.rowcount
+            conn.commit()
+            conn.close()
+            return affected > 0
 
-        balance = u["balance"]
-        current_lvl = u["level"]
+    def get_balance(self, user_id):
+        user = self.get_user(user_id)
+        if user and 'dark_points' in user.keys():
+            return user['dark_points']
+        return 0
 
-        # محاسبه سطح جدید بر اساس LEVEL_THRESHOLDS
-        new_lvl = current_lvl
-        for i, threshold in enumerate(config.LEVEL_THRESHOLDS, start=1):
-            if balance >= threshold:
-                new_lvl = i
-            else:
+    def get_level(self, user_id):
+        user = self.get_user(user_id)
+        if user and 'level' in user.keys():
+            return user['level']
+        return 1
+
+    def ban_user(self, user_id):
+        self.update_user(user_id, is_banned=1)
+
+    def unban_user(self, user_id):
+        self.update_user(user_id, is_banned=0)
+
+    def is_banned(self, user_id):
+        u = self.get_user(user_id)
+        if u and 'is_banned' in u.keys():
+            return u['is_banned'] == 1
+        return False
+
+    def check_and_update_level(self, user_id):
+        from config import LEVEL_REQUIREMENTS, LEVEL_REWARDS
+        user = self.get_user(user_id)
+        if not user:
+            return None, None
+        current_level = user['level']
+        total_earned = user['total_earned']
+        new_level = current_level
+        for lvl in range(20, 0, -1):
+            if total_earned >= LEVEL_REQUIREMENTS.get(lvl, float('inf')):
+                new_level = lvl
                 break
+        if new_level > current_level:
+            reward = 0
+            for lvl in range(current_level + 1, new_level + 1):
+                reward += LEVEL_REWARDS.get(lvl, 0)
+            self.update_user(user_id, level=new_level)
+            if reward > 0:
+                self.add_dark_points(user_id, reward)
+            return new_level, reward
+        return None, None
 
-        # محدود به حداکثر 20
-        new_lvl = min(new_lvl, 20)
+    def get_cooldown_remaining(self, user_id):
+        user = self.get_user(user_id)
+        if not user:
+            return 0
+        elapsed = time.time() - user['last_claim_time']
+        return max(0, user['last_cooldown'] - elapsed)
 
-        # اگر ارتقا یافت
-        if new_lvl > current_lvl:
-            # جایزه هر سطح جدید
-            total_reward = 0
-            for lvl in range(current_lvl + 1, new_lvl + 1):
-                reward = config.get_level_reward(lvl)
-                total_reward += reward
+    def set_claim(self, user_id, cooldown):
+        self.update_user(user_id, last_claim_time=time.time(), last_cooldown=cooldown)
 
-            self.conn.execute(
-                "UPDATE users SET level=?, balance = balance + ? "
-                "WHERE user_id=?",
-                (new_lvl, total_reward, user_id)
-            )
-            logger.info(
-                f"⬆️ Level up: user={user_id} "
-                f"{current_lvl} → {new_lvl} (+{total_reward} DP)"
-            )
+    def add_referral(self, referrer_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?", (referrer_id,))
+            conn.commit()
+            conn.close()
 
-    # ══════════════════════════════════════════════════════
-    #  کلیم و گردونه
-    # ══════════════════════════════════════════════════════
-    def set_last_claim(self, user_id, ts):
-        """ثبت زمان آخرین کلیم"""
-        self.conn.execute(
-            "UPDATE users SET last_claim=? WHERE user_id=?",
-            (ts, user_id)
-        )
-
-    def set_claim_cooldown(self, user_id, cd):
-        """تنظیم کولداون کلیم (ثانیه)"""
-        self.conn.execute(
-            "UPDATE users SET claim_cooldown=? WHERE user_id=?",
-            (cd, user_id)
-        )
-
-    def set_last_wheel(self, user_id, ts):
-        """ثبت زمان آخرین گردونه"""
-        self.conn.execute(
-            "UPDATE users SET last_wheel=? WHERE user_id=?",
-            (ts, user_id)
-        )
-
-    # ══════════════════════════════════════════════════════
-    #  ریفرال و لیدربورد
-    # ══════════════════════════════════════════════════════
     def get_referral_count(self, user_id):
-        """تعداد زیرمجموعه‌های یک کاربر"""
-        c = self.conn.execute(
-            "SELECT COUNT(*) FROM users WHERE referred_by=?",
-            (user_id,)
-        )
-        return c.fetchone()[0]
+        user = self.get_user(user_id)
+        if user and 'referral_count' in user.keys():
+            return user['referral_count']
+        return 0
 
-    def get_top_users(self, n=10):
-        """n نفر برتر بر اساس موجودی"""
-        c = self.conn.execute(
-            "SELECT user_id, username, first_name, balance, level "
-            "FROM users WHERE banned=0 "
-            "ORDER BY balance DESC LIMIT ?",
-            (n,)
-        )
-        return [dict(r) for r in c.fetchall()]
-
-    # ══════════════════════════════════════════════════════
-    #  آمار کلی
-    # ══════════════════════════════════════════════════════
-    def get_total_users(self):
-        """کل تعداد کاربران"""
-        c = self.conn.execute("SELECT COUNT(*) FROM users")
-        return c.fetchone()[0]
-
-    def get_total_balance(self):
-        """مجموع DP در گردش"""
-        c = self.conn.execute(
-            "SELECT COALESCE(SUM(balance), 0) FROM users"
-        )
-        return c.fetchone()[0]
-
-    def get_today_new_users(self):
-        """کاربران جدید امروز"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        c = self.conn.execute(
-            "SELECT COUNT(*) FROM users WHERE joined_at LIKE ?",
-            (f"{today}%",)
-        )
-        return c.fetchone()[0]
+    def get_leaderboard(self, limit=100):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, first_name, dark_points, level FROM users WHERE is_banned = 0 ORDER BY dark_points DESC LIMIT ?", (limit,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
 
     def get_all_user_ids(self):
-        """لیست آیدی همه کاربران غیر بن‌شده (برای broadcast)"""
-        c = self.conn.execute(
-            "SELECT user_id FROM users WHERE banned=0"
-        )
-        return [r[0] for r in c.fetchall()]
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE is_banned = 0")
+        rows = c.fetchall()
+        conn.close()
+        return [r['user_id'] for r in rows]
 
-    # ══════════════════════════════════════════════════════
-    #  تنظیمات (settings)
-    # ══════════════════════════════════════════════════════
+    def claim_first_reward(self, user_id):
+        u = self.get_user(user_id)
+        if not u or u['first_reward_claimed']:
+            return False
+        from config import FIRST_JOIN_REWARD
+        reward = int(self.get_setting('first_join_reward', str(FIRST_JOIN_REWARD)))
+        self.add_dark_points(user_id, reward)
+        self.update_user(user_id, first_reward_claimed=1)
+        return reward
+
+    def can_transfer(self, user_id):
+        from config import MAX_DAILY_TRANSFERS
+        u = self.get_user(user_id)
+        if not u:
+            return False, 0
+        now = time.time()
+        last_day = u['last_transfer_day']
+        count = u['transfer_count_today']
+        if now - last_day >= 86400:
+            self.update_user(user_id, transfer_count_today=0, last_transfer_day=now)
+            return True, MAX_DAILY_TRANSFERS
+        if count >= MAX_DAILY_TRANSFERS:
+            remaining = 86400 - (now - last_day)
+            return False, remaining
+        return True, MAX_DAILY_TRANSFERS - count
+
+    def increment_transfer_count(self, user_id):
+        u = self.get_user(user_id)
+        if not u:
+            return
+        now = time.time()
+        last_day = u['last_transfer_day']
+        if now - last_day >= 86400:
+            self.update_user(user_id, transfer_count_today=1, last_transfer_day=now)
+        else:
+            self.update_user(user_id, transfer_count_today=u['transfer_count_today'] + 1)
+
+    # ============ WHEEL ============
+    def can_spin_wheel_free(self, user_id):
+        u = self.get_user(user_id)
+        if not u:
+            return False, 0
+        from config import WHEEL_FREE_INTERVAL
+        elapsed = time.time() - u['last_wheel_spin']
+        if elapsed >= WHEEL_FREE_INTERVAL:
+            return True, 0
+        return False, WHEEL_FREE_INTERVAL - elapsed
+
+    def set_wheel_spin_time(self, user_id):
+        self.update_user(user_id, last_wheel_spin=time.time())
+
+    # ============ TASKS ============
+    def add_task(self, task_type, channel_username, channel_title, description, reward, capacity=0):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO tasks (task_type, channel_username, channel_title, description, reward, capacity, created_at) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      (task_type, channel_username, channel_title, description, reward, capacity, time.time()))
+            tid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return tid
+
+    def get_tasks(self, task_type=None, only_active=True):
+        conn = self.get_conn()
+        c = conn.cursor()
+        if task_type:
+            if only_active:
+                c.execute("SELECT * FROM tasks WHERE active = 1 AND task_type = ? ORDER BY task_id ASC", (task_type,))
+            else:
+                c.execute("SELECT * FROM tasks WHERE task_type = ? ORDER BY task_id ASC", (task_type,))
+        else:
+            if only_active:
+                c.execute("SELECT * FROM tasks WHERE active = 1 ORDER BY task_id ASC")
+            else:
+                c.execute("SELECT * FROM tasks ORDER BY task_id ASC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
+    def get_task(self, task_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        t = c.fetchone()
+        conn.close()
+        return t
+
+    def delete_task(self, task_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+            conn.commit()
+            conn.close()
+
+    def increment_task_completed(self, task_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE tasks SET completed_count = completed_count + 1 WHERE task_id = ?", (task_id,))
+            conn.commit()
+            conn.close()
+
+    def is_task_full(self, task_id):
+        t = self.get_task(task_id)
+        if not t or t['capacity'] == 0:
+            return False
+        return t['completed_count'] >= t['capacity']
+
+    def is_task_completed(self, user_id, task_id):
+        u = self.get_user(user_id)
+        if not u:
+            return False
+        completed = u['completed_tasks'] or ''
+        return str(task_id) in completed.split(',')
+
+    def mark_task_completed(self, user_id, task_id):
+        u = self.get_user(user_id)
+        if not u:
+            return
+        completed = u['completed_tasks'] or ''
+        tasks_list = completed.split(',') if completed else []
+        if str(task_id) not in tasks_list:
+            tasks_list.append(str(task_id))
+            self.update_user(user_id, completed_tasks=','.join(tasks_list))
+            self.increment_task_completed(task_id)
+
+    # ============ MISSION REQUESTS ============
+    def create_mission_request(self, user_id, task_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO mission_requests (user_id, task_id, created_at) 
+                         VALUES (?, ?, ?)""",
+                      (user_id, task_id, time.time()))
+            rid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return rid
+
+    def get_mission_request(self, request_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM mission_requests WHERE request_id = ?", (request_id,))
+        r = c.fetchone()
+        conn.close()
+        return r
+
+    def approve_mission_request(self, request_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE mission_requests SET status = 'approved' WHERE request_id = ?", (request_id,))
+            conn.commit()
+            conn.close()
+
+    def reject_mission_request(self, request_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE mission_requests SET status = 'rejected' WHERE request_id = ?", (request_id,))
+            conn.commit()
+            conn.close()
+
+    def has_pending_mission_request(self, user_id, task_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM mission_requests WHERE user_id = ? AND task_id = ? AND status = 'pending'", (user_id, task_id))
+        r = c.fetchone()
+        conn.close()
+        return r is not None
+
+    # ============ GAMES ============
+    def create_game(self, creator_id, amount, chat_id, message_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO games (creator_id, amount, chat_id, message_id, created_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (creator_id, amount, chat_id, message_id, time.time()))
+            game_id = c.lastrowid
+            conn.commit()
+            conn.close()
+            return game_id
+
+    def get_game(self, game_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM games WHERE game_id = ?", (game_id,))
+        game = c.fetchone()
+        conn.close()
+        return game
+
+    def join_game(self, game_id, joiner_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE games SET joiner_id = ?, status = 'playing' WHERE game_id = ? AND status = 'waiting'",
+                      (joiner_id, game_id))
+            affected = c.rowcount
+            conn.commit()
+            conn.close()
+            return affected > 0
+
+    def finish_game(self, game_id, winner_id, loser_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE games SET winner_id = ?, loser_id = ?, status = 'finished' WHERE game_id = ?",
+                      (winner_id, loser_id, game_id))
+            conn.commit()
+            conn.close()
+
+    def cancel_game(self, game_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE games SET status = 'cancelled' WHERE game_id = ?", (game_id,))
+            conn.commit()
+            conn.close()
+
+    def create_crash_game(self, user_id, bet, crash_point, chat_id, message_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO crash_games (user_id, bet_amount, crash_point, chat_id, message_id, created_at) 
+                         VALUES (?, ?, ?, ?, ?, ?)""",
+                      (user_id, bet, crash_point, chat_id, message_id, time.time()))
+            gid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return gid
+
+    def get_crash_game(self, game_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM crash_games WHERE game_id = ?", (game_id,))
+        g = c.fetchone()
+        conn.close()
+        return g
+
+    def cashout_crash_game(self, game_id, multiplier, profit):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE crash_games SET cashed_out = ?, profit = ?, status = 'won' WHERE game_id = ? AND status = 'playing'",
+                      (multiplier, profit, game_id))
+            affected = c.rowcount
+            conn.commit()
+            conn.close()
+            return affected > 0
+
+    def crash_game_lost(self, game_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE crash_games SET status = 'lost' WHERE game_id = ?", (game_id,))
+            conn.commit()
+            conn.close()
+
+    def increment_crash_stats(self, user_id, won=False):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            if won:
+                c.execute("UPDATE users SET crash_games_played = crash_games_played + 1, crash_games_won = crash_games_won + 1 WHERE user_id = ?", (user_id,))
+            else:
+                c.execute("UPDATE users SET crash_games_played = crash_games_played + 1 WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+
+    def record_transfer(self, from_id, to_id, amount, fee):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO transfers (from_id, to_id, amount, fee, created_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (from_id, to_id, amount, fee, time.time()))
+            conn.commit()
+            conn.close()    # ============ SETTINGS ============
     def get_setting(self, key, default=""):
-        """خواندن یک تنظیم"""
-        try:
-            c = self.conn.execute(
-                "SELECT value FROM settings WHERE key=?", (key,)
-            )
-            row = c.fetchone()
-            return row[0] if row else default
-        except Exception:
-            return default
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = c.fetchone()
+        conn.close()
+        return row['value'] if row else default
 
     def set_setting(self, key, value):
-        """ذخیره یک تنظیم"""
-        self.conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, str(value))
-        )
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            conn.commit()
+            conn.close()
 
-    def is_section_on(self, section):
-        """آیا بخش روشن است؟"""
-        val = self.get_setting(f"sec_{section}", "1")
-        return val == "1"
+    # ============ FORCE CHANNELS ============
+    def add_force_channel(self, username, title=""):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            try:
+                c.execute("INSERT INTO force_channels (channel_username, channel_title, added_at) VALUES (?, ?, ?)",
+                          (username, title, time.time()))
+                conn.commit()
+                success = True
+            except Exception:
+                success = False
+            conn.close()
+            return success
 
-    def set_section(self, section, on: bool):
-        """روشن/خاموش کردن بخش"""
-        self.set_setting(f"sec_{section}", "1" if on else "0")    # ──────────────────────────────────────────────
-    #  🏦  DARK BANK
-    # ──────────────────────────────────────────────
-    def add_bank_balance(self, user_id: int, amount: int):
-        self.conn.execute(
-            "UPDATE users SET bank_balance = bank_balance + ? WHERE user_id = ?",
-            (amount, user_id),
-        )
+    def remove_force_channel(self, channel_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("DELETE FROM force_channels WHERE channel_id = ?", (channel_id,))
+            conn.commit()
+            conn.close()
 
-    def set_bank_balance(self, user_id: int, amount: int):
-        self.conn.execute(
-            "UPDATE users SET bank_balance = ? WHERE user_id = ?",
-            (amount, user_id),
-        )
+    def get_force_channels(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM force_channels WHERE active = 1")
+        rows = c.fetchall()
+        conn.close()
+        return rows
 
-    def set_bank_lock(self, user_id: int, lock_until: int):
-        self.conn.execute(
-            "UPDATE users SET bank_lock_until = ? WHERE user_id = ?",
-            (lock_until, user_id),
-        )
+    # ============ CUSTOM PANELS ============
+    def add_custom_panel(self, name, description, price, data_limit):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO custom_panels (name, description, price, data_limit, created_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (name, description, price, data_limit, time.time()))
+            pid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return pid
 
-    def set_bank_last_interest(self, user_id: int, ts: int):
-        self.conn.execute(
-            "UPDATE users SET bank_last_interest = ? WHERE user_id = ?",
-            (ts, user_id),
-        )
+    def get_custom_panels(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM custom_panels WHERE active = 1 ORDER BY price ASC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
 
-    # ──────────────────────────────────────────────
-    #  ⛏️  MINER
-    # ──────────────────────────────────────────────
-    def set_miner_level(self, user_id: int, level: int):
-        self.conn.execute(
-            "UPDATE users SET miner_level = ? WHERE user_id = ?",
-            (level, user_id),
-        )
+    def get_all_custom_panels(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM custom_panels ORDER BY panel_id ASC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
 
-    def set_miner_currency(self, user_id: int, currency: str):
-        self.conn.execute(
-            "UPDATE users SET miner_currency = ? WHERE user_id = ?",
-            (currency, user_id),
-        )
+    def delete_custom_panel(self, panel_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("DELETE FROM custom_panels WHERE panel_id = ?", (panel_id,))
+            conn.commit()
+            conn.close()
 
-    def set_miner_last_collect(self, user_id: int, ts: int):
-        self.conn.execute(
-            "UPDATE users SET miner_last_collect = ? WHERE user_id = ?",
-            (ts, user_id),
-        )
+    # ============ ORDERS ============
+    def create_gift_order(self, user_id, gift_type, price):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO gift_orders (user_id, gift_type, price, created_at) 
+                         VALUES (?, ?, ?, ?)""",
+                      (user_id, gift_type, price, time.time()))
+            oid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return oid
 
-    def add_ton_balance(self, user_id: int, amount: float):
-        self.conn.execute(
-            "UPDATE users SET ton_balance = ton_balance + ? WHERE user_id = ?",
-            (amount, user_id),
-        )
+    def create_stars_order(self, user_id, target_id, target_type, amount, dp_cost):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO stars_orders (user_id, target_id, target_type, amount, dp_cost, created_at) 
+                         VALUES (?, ?, ?, ?, ?, ?)""",
+                      (user_id, target_id, target_type, amount, dp_cost, time.time()))
+            oid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return oid
 
-    def add_usdt_balance(self, user_id: int, amount: float):
-        self.conn.execute(
-            "UPDATE users SET usdt_balance = usdt_balance + ? WHERE user_id = ?",
-            (amount, user_id),
-        )
+    def create_panel_order(self, user_id, plan_name, price, config_data=""):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO panel_orders (user_id, plan_name, price, config_data, created_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (user_id, plan_name, price, config_data, time.time()))
+            oid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return oid
 
-    # ──────────────────────────────────────────────
-    #  🏭  FACTORY
-    # ──────────────────────────────────────────────
-    def set_factory_level(self, user_id: int, level: int):
-        self.conn.execute(
-            "UPDATE users SET factory_level = ? WHERE user_id = ?",
-            (level, user_id),
-        )
+    def create_check(self, amount):
+        code = ''.join(random.choices(string.ascii_lowercase * 4 + string.digits, k=16))
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("INSERT INTO checks (code, amount, created_at) VALUES (?, ?, ?)",
+                      (code, amount, time.time()))
+            conn.commit()
+            conn.close()
+            return code
 
-    def set_factory_last_collect(self, user_id: int, ts: int):
-        self.conn.execute(
-            "UPDATE users SET factory_last_collect = ? WHERE user_id = ?",
-            (ts, user_id),
-        )
+    def claim_check(self, code, user_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("SELECT * FROM checks WHERE code = ? AND claimed = 0", (code,))
+            check = c.fetchone()
+            if check:
+                c.execute("UPDATE checks SET claimed = 1, claimed_by = ? WHERE code = ?",
+                          (user_id, code))
+                conn.commit()
+                conn.close()
+                return check['amount']
+            conn.close()
+            return None
 
-    # ──────────────────────────────────────────────
-    #  💸  TRANSFER
-    # ──────────────────────────────────────────────
-    def get_transfer_count_today(self, user_id: int) -> int:
-        today_start = int(datetime.now().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).timestamp())
-        row = self.conn.execute(
-            "SELECT COUNT(*) FROM transfers WHERE from_id = ? AND created_at >= ?",
-            (user_id, today_start),
-        ).fetchone()
-        return row[0] if row else 0
-
-    def add_transfer_record(self, from_id: int, to_id: int,
-                            amount: int, fee: int):
-        self.conn.execute(
-            "INSERT INTO transfers (from_id, to_id, amount, fee, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (from_id, to_id, amount, fee, int(time.time())),
-        )
-
-    # ──────────────────────────────────────────────
-    #  💎  TON WITHDRAWALS
-    # ──────────────────────────────────────────────
-    def add_ton_withdrawal(self, user_id: int, dp_amount: int,
-                           ton_amount: float, wallet: str,
-                           status: str = "pending") -> int:
-        cur = self.conn.execute(
-            "INSERT INTO ton_withdrawals "
-            "(user_id, dp_amount, ton_amount, wallet, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, dp_amount, ton_amount, wallet, status,
-             int(time.time())),
-        )
-        return cur.lastrowid
-
-    def get_pending_ton_withdrawals(self) -> list:
-        rows = self.conn.execute(
-            "SELECT id, user_id, dp_amount, ton_amount, wallet, "
-            "       status, created_at "
-            "FROM ton_withdrawals "
-            "WHERE status = 'pending' "
-            "ORDER BY created_at ASC",
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def set_ton_withdrawal_status(self, withdrawal_id: int, status: str):
-        self.conn.execute(
-            "UPDATE ton_withdrawals SET status = ? WHERE id = ?",
-            (status, withdrawal_id),
-        )
-
-    def get_ton_withdrawal_stats(self) -> dict:
-        total = self.conn.execute(
-            "SELECT COUNT(*) FROM ton_withdrawals"
-        ).fetchone()[0]
-        pending = self.conn.execute(
-            "SELECT COUNT(*) FROM ton_withdrawals WHERE status='pending'"
-        ).fetchone()[0]
-        approved = self.conn.execute(
-            "SELECT COUNT(*) FROM ton_withdrawals WHERE status='approved'"
-        ).fetchone()[0]
-        rejected = self.conn.execute(
-            "SELECT COUNT(*) FROM ton_withdrawals WHERE status='rejected'"
-        ).fetchone()[0]
-        total_ton = self.conn.execute(
-            "SELECT COALESCE(SUM(ton_amount),0) FROM ton_withdrawals "
-            "WHERE status='approved'"
-        ).fetchone()[0]
-        total_dp = self.conn.execute(
-            "SELECT COALESCE(SUM(dp_amount),0) FROM ton_withdrawals "
-            "WHERE status='approved'"
-        ).fetchone()[0]
-        return {
-            "total": total,
-            "pending": pending,
-            "approved": approved,
-            "rejected": rejected,
-            "total_ton": total_ton,
-            "total_dp": total_dp,
-        }
-
-    # ──────────────────────────────────────────────
-    #  👥  GROUPS
-    # ──────────────────────────────────────────────
-    def add_group(self, chat_id: int, title: str):
-        self.conn.execute(
-            "INSERT OR REPLACE INTO groups (chat_id, title, added_at) "
-            "VALUES (?, ?, ?)",
-            (chat_id, title, int(time.time())),
-        )
-
-    def remove_group(self, chat_id: int):
-        self.conn.execute(
-            "DELETE FROM groups WHERE chat_id = ?", (chat_id,)
-        )
-
-    def get_all_groups(self) -> list:
-        rows = self.conn.execute(
-            "SELECT chat_id, title, added_at FROM groups"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def get_total_groups(self) -> int:
-        return self.conn.execute(
-            "SELECT COUNT(*) FROM groups"
-        ).fetchone()[0]    # ──────────────────────────────────────────────
-    #  🛒  SHOP PLANS
-    # ──────────────────────────────────────────────
-    def get_shop_plans(self, active_only: bool = True) -> list:
-        if active_only:
-            rows = self.conn.execute(
-                "SELECT * FROM shop_plans WHERE active = 1 "
-                "ORDER BY price ASC"
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM shop_plans ORDER BY price ASC"
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-    def get_shop_plan(self, plan_id: int) -> dict | None:
-        row = self.conn.execute(
-            "SELECT * FROM shop_plans WHERE id = ?", (plan_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-    def add_shop_plan(self, name: str, description: str,
-                      price: int, stock: int = -1) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO shop_plans "
-            "(name, description, price, stock, active, created_at) "
-            "VALUES (?, ?, ?, ?, 1, ?)",
-            (name, description, price, stock, int(time.time())),
-        )
-        return cur.lastrowid
-
-    def remove_shop_plan(self, plan_id: int):
-        self.conn.execute(
-            "DELETE FROM shop_plans WHERE id = ?", (plan_id,)
-        )
-
-    def set_plan_stock(self, plan_id: int, stock: int):
-        self.conn.execute(
-            "UPDATE shop_plans SET stock = ? WHERE id = ?",
-            (stock, plan_id),
-        )
-
-    def decrease_plan_stock(self, plan_id: int) -> bool:
-        """Returns True if stock was available and decreased."""
-        plan = self.get_shop_plan(plan_id)
-        if not plan:
-            return False
-        if plan["stock"] == -1:          # unlimited
+    # ============ BANK ============
+    def open_bank_account(self, user_id, card_number):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("SELECT * FROM bank_cards WHERE card_number = ?", (card_number,))
+            if c.fetchone():
+                conn.close()
+                return False
+            c.execute("INSERT INTO bank_cards (card_number, user_id) VALUES (?, ?)", (card_number, user_id))
+            c.execute("UPDATE users SET bank_account = 1, bank_card = ? WHERE user_id = ?", (card_number, user_id))
+            conn.commit()
+            conn.close()
             return True
-        if plan["stock"] <= 0:
+
+    def bank_deposit(self, user_id, amount):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("SELECT dark_points FROM users WHERE user_id = ?", (user_id,))
+            user = c.fetchone()
+            if not user or user['dark_points'] < amount:
+                conn.close()
+                return False
+            c.execute("""UPDATE users SET dark_points = dark_points - ?,
+                bank_balance = bank_balance + ?, bank_deposit_time = ?, bank_interest_collected = 0
+                WHERE user_id = ?""", (amount, amount, time.time(), user_id))
+            conn.commit()
+            conn.close()
+            return True
+
+    def bank_withdraw(self, user_id):
+        from config import BANK_INTEREST_RATE
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("SELECT bank_balance, bank_deposit_time, bank_interest_collected FROM users WHERE user_id = ?", (user_id,))
+            user = c.fetchone()
+            if not user or user['bank_balance'] <= 0:
+                conn.close()
+                return 0, 0
+            balance = user['bank_balance']
+            elapsed = time.time() - user['bank_deposit_time']
+            interest = int(balance * BANK_INTEREST_RATE) if elapsed >= 86400 and not user['bank_interest_collected'] else 0
+            total = balance + interest
+            c.execute("""UPDATE users SET dark_points = dark_points + ?,
+                bank_balance = 0, bank_deposit_time = 0, bank_interest_collected = 0 WHERE user_id = ?""",
+                (total, user_id))
+            conn.commit()
+            conn.close()
+            return balance, interest
+
+    def get_total_bank_balance(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT COALESCE(SUM(bank_balance), 0) as total FROM users WHERE bank_balance > 0")
+        row = c.fetchone()
+        conn.close()
+        return row['total'] if row else 0
+
+    def generate_bank_card(self):
+        return ''.join(random.choices(string.digits, k=13))
+
+    def card_exists(self, card_number):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM bank_cards WHERE card_number = ?", (card_number,))
+        exists = c.fetchone() is not None
+        conn.close()
+        return exists
+
+    # ============ FACTORY ============
+    def open_factory(self, user_id):
+        self.update_user(user_id, factory_level=1, factory_active=1,
+                         factory_last_collect=time.time(), factory_last_maintenance=time.time())
+
+    def reactivate_factory(self, user_id):
+        u = self.get_user(user_id)
+        if not u or u['factory_level'] == 0:
             return False
-        self.conn.execute(
-            "UPDATE shop_plans SET stock = stock - 1 WHERE id = ?",
-            (plan_id,),
-        )
+        self.update_user(user_id, factory_active=1,
+                         factory_last_collect=time.time(), factory_last_maintenance=time.time())
         return True
 
-    def set_plan_active(self, plan_id: int, active: bool):
-        self.conn.execute(
-            "UPDATE shop_plans SET active = ? WHERE id = ?",
-            (1 if active else 0, plan_id),
+    def upgrade_factory(self, user_id):
+        user = self.get_user(user_id)
+        if not user or user['factory_level'] >= 5:
+            return False
+        self.update_user(user_id, factory_level=user['factory_level'] + 1)
+        return True
+
+    def collect_factory(self, user_id):
+        from config import FACTORY_LEVELS
+        user = self.get_user(user_id)
+        if not user or not user['factory_active'] or user['factory_level'] == 0:
+            return 0
+        level = user['factory_level']
+        mine_per_min = FACTORY_LEVELS[level]['mine_per_min']
+        elapsed_min = (time.time() - user['factory_last_collect']) / 60.0
+        mined = int(elapsed_min * mine_per_min)
+        if mined > 0:
+            self.add_dark_points(user_id, mined)
+            self.update_user(user_id, factory_last_collect=time.time())
+        return mined
+
+    def factory_maintenance_due(self, user_id):
+        from config import FACTORY_HOURLY_MAINTENANCE
+        user = self.get_user(user_id)
+        if not user or not user['factory_active']:
+            return 0
+        elapsed_hours = (time.time() - user['factory_last_maintenance']) / 3600.0
+        hours_due = int(elapsed_hours)
+        cost = hours_due * FACTORY_HOURLY_MAINTENANCE
+        if cost > 0:
+            if self.remove_dark_points(user_id, cost):
+                self.update_user(user_id, factory_last_maintenance=time.time())
+                return cost
+            else:
+                self.update_user(user_id, factory_active=0)
+                return -1
+        return 0
+
+    # ============ GROUPS ============
+    def add_or_update_group(self, chat_id, title, member_count, is_admin=0):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT OR REPLACE INTO groups (chat_id, title, member_count, is_admin, added_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (chat_id, title, member_count, is_admin, time.time()))
+            conn.commit()
+            conn.close()
+
+    def get_all_groups(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM groups ORDER BY added_at DESC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
+    def get_admin_groups(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM groups WHERE is_admin = 1")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+
+    def update_group_admin_status(self, chat_id, is_admin):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE groups SET is_admin = ? WHERE chat_id = ?", (is_admin, chat_id))
+            conn.commit()
+            conn.close()
+
+    def get_all_users_count(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) as cnt FROM users")
+        row = c.fetchone()
+        conn.close()
+        return row['cnt'] if row else 0
+
+    def log_broadcast(self, admin_id, msg_type, total, sent, failed):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO broadcast_logs (admin_id, message_type, total_users, sent_count, failed_count, created_at) 
+                         VALUES (?, ?, ?, ?, ?, ?)""",
+                      (admin_id, msg_type, total, sent, failed, time.time()))
+            conn.commit()
+            conn.close()
+
+    def get_stats(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        stats = {}
+        c.execute("SELECT COUNT(*) as cnt FROM users")
+        stats['total_users'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE is_banned = 1")
+        stats['banned_users'] = c.fetchone()['cnt']
+        threshold = time.time() - (7 * 86400)
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE last_active > ?", (threshold,))
+        stats['active_7d'] = c.fetchone()['cnt']
+        today = time.time() - 86400
+        c.execute("SELECT COUNT(*) as cnt FROM users WHERE created_at > ?", (today,))
+        stats['new_today'] = c.fetchone()['cnt']
+        c.execute("SELECT COALESCE(SUM(dark_points), 0) as total FROM users")
+        stats['total_dp'] = c.fetchone()['total']
+        c.execute("SELECT COALESCE(SUM(bank_balance), 0) as total FROM users")
+        stats['total_bank'] = c.fetchone()['total']
+        c.execute("SELECT COUNT(*) as cnt FROM panel_orders")
+        stats['panel_orders'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM gift_orders")
+        stats['gift_orders'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM stars_orders")
+        stats['stars_orders'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM crash_games WHERE status = 'won'")
+        stats['crash_won'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM crash_games WHERE status = 'lost'")
+        stats['crash_lost'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM groups WHERE is_admin = 1")
+        stats['admin_groups'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM groups")
+        stats['total_groups'] = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM shop_orders")
+        stats['shop_orders'] = c.fetchone()['cnt']
+        conn.close()
+        return stats
+
+    def search_user_by_username(self, username):
+        conn = self.get_conn()
+        c = conn.cursor()
+        username = username.replace("@", "")
+        c.execute("SELECT * FROM users WHERE username = ?", (username,))
+        u = c.fetchone()
+        conn.close()
+        return u
+
+    # ============ MINER METHODS ============
+    def get_miner(self, user_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM miners WHERE user_id = ?", (user_id,))
+        m = c.fetchone()
+        conn.close()
+        return m
+
+    def create_miner(self, user_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT OR IGNORE INTO miners 
+                (user_id, miner_level, created_at, last_update_time) 
+                VALUES (?, 1, ?, ?)""",
+                (user_id, time.time(), time.time()))
+            conn.commit()
+            conn.close()
+
+    def update_miner(self, user_id, **kwargs):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            sets = ", ".join([f"{k} = ?" for k in kwargs.keys()])
+            vals = list(kwargs.values()) + [user_id]
+            c.execute(f"UPDATE miners SET {sets} WHERE user_id = ?", vals)
+            conn.commit()
+            conn.close()
+
+    def upgrade_miner(self, user_id):
+        miner = self.get_miner(user_id)
+        if not miner or miner['miner_level'] >= 5:
+            return False
+        new_level = miner['miner_level'] + 1
+        self.update_miner(user_id, miner_level=new_level)
+        return True
+
+    def add_electricity(self, user_id, hours):
+        miner = self.get_miner(user_id)
+        if not miner:
+            return False
+        new_hours = miner['electricity_hours'] + hours
+        self.update_miner(user_id, electricity_hours=new_hours)
+        return True
+
+    def start_mining(self, user_id, currency):
+        self.update_miner(user_id,
+            is_mining=1,
+            mining_currency=currency,
+            last_mining_start=time.time(),
+            last_update_time=time.time()
         )
 
-    # ──────────────────────────────────────────────
-    #  🎁  GIFT PLANS
-    # ──────────────────────────────────────────────
-    def get_gift_plans(self, active_only: bool = True) -> list:
-        if active_only:
-            rows = self.conn.execute(
-                "SELECT * FROM gift_plans WHERE active = 1 "
-                "ORDER BY dp_amount ASC"
-            ).fetchall()
+    def stop_mining(self, user_id):
+        self.update_mining_balance(user_id)
+        self.update_miner(user_id, is_mining=0, mining_currency='')
+
+    def update_mining_balance(self, user_id):
+        from config import MINER_LEVELS
+        miner = self.get_miner(user_id)
+        if not miner or not miner['is_mining']:
+            return 0
+
+        now = time.time()
+        elapsed_hours = (now - miner['last_update_time']) / 3600.0
+
+        if elapsed_hours > miner['electricity_hours']:
+            elapsed_hours = miner['electricity_hours']
+
+        if elapsed_hours <= 0:
+            if miner['is_mining']:
+                self.update_miner(user_id, is_mining=0, electricity_hours=0, mining_currency='')
+            return 0
+
+        level = miner['miner_level']
+        if level == 0:
+            return 0
+
+        rates = MINER_LEVELS[level]
+        currency = miner['mining_currency']
+
+        mined = 0
+        if currency == 'ton':
+            mined = elapsed_hours * rates['ton_per_hour']
+            new_balance = miner['ton_balance'] + mined
+            new_total = miner['total_ton_mined'] + mined
+            self.update_miner(user_id,
+                ton_balance=new_balance,
+                total_ton_mined=new_total,
+                electricity_hours=max(0, miner['electricity_hours'] - elapsed_hours),
+                last_update_time=now
+            )
+        elif currency == 'usdt':
+            mined = elapsed_hours * rates['usdt_per_hour']
+            new_balance = miner['usdt_balance'] + mined
+            new_total = miner['total_usdt_mined'] + mined
+            self.update_miner(user_id,
+                usdt_balance=new_balance,
+                total_usdt_mined=new_total,
+                electricity_hours=max(0, miner['electricity_hours'] - elapsed_hours),
+                last_update_time=now
+            )
+
+        updated_miner = self.get_miner(user_id)
+        if updated_miner['electricity_hours'] <= 0.001:
+            self.update_miner(user_id, is_mining=0, mining_currency='', electricity_hours=0)
+
+        return mined
+
+    def convert_ton_to_dp(self, user_id, ton_amount):
+        from config import TON_TO_DP_RATE
+        miner = self.get_miner(user_id)
+        if not miner or miner['ton_balance'] < ton_amount:
+            return 0
+        dp_received = int((ton_amount / 0.01) * TON_TO_DP_RATE)
+        self.update_miner(user_id,
+            ton_balance=miner['ton_balance'] - ton_amount,
+            total_ton_converted=miner['total_ton_converted'] + ton_amount
+        )
+        self.add_dark_points(user_id, dp_received)
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO currency_conversions (user_id, currency, amount, dp_received, created_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (user_id, 'ton', ton_amount, dp_received, time.time()))
+            conn.commit()
+            conn.close()
+        return dp_received
+
+    def convert_usdt_to_dp(self, user_id, usdt_amount):
+        from config import USDT_TO_DP_RATE
+        miner = self.get_miner(user_id)
+        if not miner or miner['usdt_balance'] < usdt_amount:
+            return 0
+        dp_received = int((usdt_amount / 0.01) * USDT_TO_DP_RATE)
+        self.update_miner(user_id,
+            usdt_balance=miner['usdt_balance'] - usdt_amount,
+            total_usdt_converted=miner['total_usdt_converted'] + usdt_amount
+        )
+        self.add_dark_points(user_id, dp_received)
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO currency_conversions (user_id, currency, amount, dp_received, created_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (user_id, 'usdt', usdt_amount, dp_received, time.time()))
+            conn.commit()
+            conn.close()
+        return dp_received
+
+    def get_total_mining_stats(self):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT COALESCE(SUM(ton_balance), 0) as total FROM miners")
+        total_ton_current = c.fetchone()['total']
+        c.execute("SELECT COALESCE(SUM(usdt_balance), 0) as total FROM miners")
+        total_usdt_current = c.fetchone()['total']
+        c.execute("SELECT COALESCE(SUM(total_ton_mined), 0) as total FROM miners")
+        total_ton_all = c.fetchone()['total']
+        c.execute("SELECT COALESCE(SUM(total_usdt_mined), 0) as total FROM miners")
+        total_usdt_all = c.fetchone()['total']
+        c.execute("SELECT COALESCE(SUM(total_ton_converted), 0) as total FROM miners")
+        total_ton_conv = c.fetchone()['total']
+        c.execute("SELECT COALESCE(SUM(total_usdt_converted), 0) as total FROM miners")
+        total_usdt_conv = c.fetchone()['total']
+        c.execute("SELECT COUNT(*) as cnt FROM miners")
+        total_miners = c.fetchone()['cnt']
+        c.execute("SELECT COUNT(*) as cnt FROM miners WHERE is_mining = 1")
+        active_miners = c.fetchone()['cnt']
+        conn.close()
+        return {
+            'total_ton_current': total_ton_current,
+            'total_usdt_current': total_usdt_current,
+            'total_ton_all': total_ton_all,
+            'total_usdt_all': total_usdt_all,
+            'total_ton_converted': total_ton_conv,
+            'total_usdt_converted': total_usdt_conv,
+            'total_miners': total_miners,
+            'active_miners': active_miners,
+        }
+
+    # ============ SHOP METHODS ============
+    def add_shop_plan(self, name, description, price, content_type, content_data, content_file_id='', stock=-1):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO shop_plans 
+                (name, description, price, content_type, content_data, content_file_id, stock, created_at) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (name, description, price, content_type, content_data, content_file_id, stock, time.time()))
+            pid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return pid
+
+    def get_shop_plans(self, only_active=True):
+        conn = self.get_conn()
+        c = conn.cursor()
+        if only_active:
+            c.execute("SELECT * FROM shop_plans WHERE active = 1 ORDER BY plan_id ASC")
         else:
-            rows = self.conn.execute(
-                "SELECT * FROM gift_plans ORDER BY dp_amount ASC"
-            ).fetchall()
-        return [dict(r) for r in rows]
+            c.execute("SELECT * FROM shop_plans ORDER BY plan_id ASC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
 
-    def get_gift_plan(self, plan_id: int) -> dict | None:
-        row = self.conn.execute(
-            "SELECT * FROM gift_plans WHERE id = ?", (plan_id,)
-        ).fetchone()
-        return dict(row) if row else None
+    def get_shop_plan(self, plan_id):
+        conn = self.get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM shop_plans WHERE plan_id = ?", (plan_id,))
+        p = c.fetchone()
+        conn.close()
+        return p
 
-    def add_gift_plan(self, name: str, dp_amount: int,
-                      price: int) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO gift_plans "
-            "(name, dp_amount, price, active, created_at) "
-            "VALUES (?, ?, ?, 1, ?)",
-            (name, dp_amount, price, int(time.time())),
-        )
-        return cur.lastrowid
+    def delete_shop_plan(self, plan_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("DELETE FROM shop_plans WHERE plan_id = ?", (plan_id,))
+            conn.commit()
+            conn.close()
 
-    def remove_gift_plan(self, plan_id: int):
-        self.conn.execute(
-            "DELETE FROM gift_plans WHERE id = ?", (plan_id,)
-        )
+    def increment_shop_sold(self, plan_id):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("UPDATE shop_plans SET sold_count = sold_count + 1 WHERE plan_id = ?", (plan_id,))
+            c.execute("UPDATE shop_plans SET stock = stock - 1 WHERE plan_id = ? AND stock > 0", (plan_id,))
+            conn.commit()
+            conn.close()
 
-    def set_gift_plan_active(self, plan_id: int, active: bool):
-        self.conn.execute(
-            "UPDATE gift_plans SET active = ? WHERE id = ?",
-            (1 if active else 0, plan_id),
-        )
-
-    # ──────────────────────────────────────────────
-    #  📋  TASKS / MISSIONS
-    # ──────────────────────────────────────────────
-    def get_active_tasks(self) -> list:
-        rows = self.conn.execute(
-            "SELECT * FROM tasks WHERE active = 1 "
-            "ORDER BY reward DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def get_task(self, task_id: int) -> dict | None:
-        row = self.conn.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-    def add_task(self, title: str, description: str,
-                 reward: int, link: str = "") -> int:
-        cur = self.conn.execute(
-            "INSERT INTO tasks "
-            "(title, description, reward, link, active, created_at) "
-            "VALUES (?, ?, ?, ?, 1, ?)",
-            (title, description, reward, link, int(time.time())),
-        )
-        return cur.lastrowid
-
-    def remove_task(self, task_id: int):
-        self.conn.execute(
-            "DELETE FROM tasks WHERE id = ?", (task_id,)
-        )
-        self.conn.execute(
-            "DELETE FROM user_tasks WHERE task_id = ?", (task_id,)
-        )
-
-    def set_task_active(self, task_id: int, active: bool):
-        self.conn.execute(
-            "UPDATE tasks SET active = ? WHERE id = ?",
-            (1 if active else 0, task_id),
-        )
-
-    def is_task_completed(self, user_id: int, task_id: int) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM user_tasks "
-            "WHERE user_id = ? AND task_id = ?",
-            (user_id, task_id),
-        ).fetchone()
-        return row is not None
-
-    def complete_task(self, user_id: int, task_id: int):
-        self.conn.execute(
-            "INSERT OR IGNORE INTO user_tasks (user_id, task_id, completed_at) "
-            "VALUES (?, ?, ?)",
-            (user_id, task_id, int(time.time())),
-        )
-
-    def get_user_completed_tasks(self, user_id: int) -> list:
-        rows = self.conn.execute(
-            "SELECT task_id FROM user_tasks WHERE user_id = ?",
-            (user_id,),
-        ).fetchall()
-        return [r["task_id"] for r in rows]
-
-    # ──────────────────────────────────────────────
-    #  👍  LIKE CHALLENGE
-    # ──────────────────────────────────────────────
-    def get_like_challenge(self, user_id: int) -> dict | None:
-        row = self.conn.execute(
-            "SELECT * FROM like_challenges "
-            "WHERE user_id = ? AND active = 1 "
-            "ORDER BY id DESC LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        return dict(row) if row else None
-
-    def set_like_challenge(self, user_id: int, target_likes: int,
-                           cost: int, deadline: int) -> int:
-        # Deactivate old challenges
-        self.conn.execute(
-            "UPDATE like_challenges SET active = 0 WHERE user_id = ?",
-            (user_id,),
-        )
-        cur = self.conn.execute(
-            "INSERT INTO like_challenges "
-            "(user_id, target_likes, current_likes, cost, deadline, active) "
-            "VALUES (?, ?, 0, ?, ?, 1)",
-            (user_id, target_likes, cost, deadline),
-        )
-        return cur.lastrowid
-
-    def update_like_progress(self, challenge_id: int, current_likes: int):
-        self.conn.execute(
-            "UPDATE like_challenges SET current_likes = ? WHERE id = ?",
-            (current_likes, challenge_id),
-        )
-
-    def deactivate_like_challenge(self, challenge_id: int):
-        self.conn.execute(
-            "UPDATE like_challenges SET active = 0 WHERE id = ?",
-            (challenge_id,),
-        )
-
-    # ──────────────────────────────────────────────
-    #  🔗  FORCE JOIN CHANNELS
-    # ──────────────────────────────────────────────
-    def get_force_join_channels(self) -> list:
-        rows = self.conn.execute(
-            "SELECT * FROM force_join WHERE active = 1"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def add_force_join_channel(self, username: str, title: str) -> int:
-        cur = self.conn.execute(
-            "INSERT OR REPLACE INTO force_join "
-            "(channel_username, channel_title, active) "
-            "VALUES (?, ?, 1)",
-            (username, title),
-        )
-        return cur.lastrowid
-
-    def remove_force_join_channel(self, channel_id: int):
-        self.conn.execute(
-            "DELETE FROM force_join WHERE id = ?", (channel_id,)
-        )
-
-    def set_force_join_active(self, channel_id: int, active: bool):
-        self.conn.execute(
-            "UPDATE force_join SET active = ? WHERE id = ?",
-            (1 if active else 0, channel_id),
-        )
-
-    # ──────────────────────────────────────────────
-    #  ⭐  STAR ORDERS
-    # ──────────────────────────────────────────────
-    def add_star_order(self, user_id: int, stars_amount: int,
-                       dp_amount: int) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO star_orders "
-            "(user_id, stars_amount, dp_amount, status, created_at) "
-            "VALUES (?, ?, ?, 'pending', ?)",
-            (user_id, stars_amount, dp_amount, int(time.time())),
-        )
-        return cur.lastrowid
-
-    def set_star_order_status(self, order_id: int, status: str):
-        self.conn.execute(
-            "UPDATE star_orders SET status = ? WHERE id = ?",
-            (status, order_id),
-        )
-
-    def get_pending_star_orders(self) -> list:
-        rows = self.conn.execute(
-            "SELECT * FROM star_orders WHERE status = 'pending' "
-            "ORDER BY created_at ASC"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    # ──────────────────────────────────────────────
-    #  💰  BUY DP ORDERS
-    # ──────────────────────────────────────────────
-    def add_buy_dp_order(self, user_id: int, dp_amount: int,
-                         price: int) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO buy_dp_orders "
-            "(user_id, dp_amount, price, status, created_at) "
-            "VALUES (?, ?, ?, 'pending', ?)",
-            (user_id, dp_amount, price, int(time.time())),
-        )
-        return cur.lastrowid
-
-    def set_buy_dp_order_status(self, order_id: int, status: str):
-        self.conn.execute(
-            "UPDATE buy_dp_orders SET status = ? WHERE id = ?",
-            (status, order_id),
-        )
-
-    def get_pending_buy_dp_orders(self) -> list:
-        rows = self.conn.execute(
-            "SELECT * FROM buy_dp_orders WHERE status = 'pending' "
-            "ORDER BY created_at ASC"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    # ──────────────────────────────────────────────
-    #  🔧  UTILITY
-    # ──────────────────────────────────────────────
-    def close(self):
-        """Close the database connection."""
-        if self.conn:
-            self.conn.close()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
+    def create_shop_order(self, user_id, plan_id, plan_name, price):
+        with self.lock:
+            conn = self.get_conn()
+            c = conn.cursor()
+            c.execute("""INSERT INTO shop_orders (user_id, plan_id, plan_name, price, created_at) 
+                         VALUES (?, ?, ?, ?, ?)""",
+                      (user_id, plan_id, plan_name, price, time.time()))
+            oid = c.lastrowid
+            conn.commit()
+            conn.close()
+            return oid
