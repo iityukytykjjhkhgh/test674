@@ -1,125 +1,126 @@
-# config.py — Dark Point Bot Configuration
-import os
+# config.py - Dark Point Bot Configuration
 
 BOT_TOKEN = "8519305274:AAFd789fODSCFl6J5oS0NVz4NG058TNTb0Q"
-ADMIN_ID = 8248647747
-LOG_CHANNEL = -1004482670552
+ADMIN_IDS = [8248647747]
+SUPPORT_USERNAME = "@kanfingfreesup"
 
-DATA_DIR = os.environ.get("DATA_DIR", ".")
-DB_PATH = os.path.join(DATA_DIR, "bot.db")
+LOG_CHANNEL_ID = -1004482670552
+LOG_CHANNEL_USERNAME = "@starsdarkconfig"
 
-# ── Currency & Claim ──
-BASE_CLAIM_MIN = 100
-BASE_CLAIM_MAX = 250
-CLAIM_COOLDOWN_MIN = 180
-CLAIM_COOLDOWN_MAX = 300
-DP_PER_LEVEL = 40
+# Panel API
+PANEL_URL = "https://your-panel-url.com"
+PANEL_API_KEYS = {"snai": "9a80695b6e3fdfdae22ec69dc110b954"}
+PANEL_INBOUND_ID = 32063619
 
-# ── TON Withdrawal (NEW) ──
-TON_WITHDRAWAL_DP_RATE = 200_000_000   # 200M DP
-TON_WITHDRAWAL_TON_AMOUNT = 0.0005     # = 0.0005 TON
-TON_WITHDRAWAL_MIN = 0.01              # min 0.01 TON
-
-# ── Dark Bank (UPDATED) ──
-BANK_INTEREST_RATE = 0.03              # 3% per 48 h
-BANK_LOCK_PERIOD = 48 * 3600           # 48 hours
-
-# ── Bomb Game (UPDATED) ──
-BOMB_MULTIPLIER_STEP = 0.2
-BOMB_GRID_SIZE = 4
-BOMB_COUNT = 6
-
-# ── Level System (NEW 20-level) ──
-LEVEL_THRESHOLDS = [
-    0,              # L1
-    20_000_000,     # L2
-    50_000_000,     # L3
-    100_000_000,    # L4
-    250_000_000,    # L5
-    400_000_000,    # L6
-    800_000_000,    # L7
-    1_000_000_000,  # L8
-    1_300_000_000,  # L9
-    1_500_000_000,  # L10
-    1_800_000_000,  # L11
-    2_000_000_000,  # L12
-    2_500_000_000,  # L13
-    3_000_000_000,  # L14
-    4_000_000_000,  # L15
-    5_000_000_000,  # L16
-    8_000_000_000,  # L17
-    12_000_000_000, # L18
-    15_000_000_000, # L19
-    20_000_000_000, # L20
-]
-
-def get_level_reward(level):
-    """Level N reward = N × 1,000,000 DP"""
-    return level * 1_000_000
-
-# ── Game Limits ──
-CRASH_MIN_BET = 500
-CRASH_MAX_BET = 500_000
-DICE_MIN_BET = 15_000
-GUESS_MIN_BET = 30_000
-CASINO_MIN_BET = 25_000
-BOMB_MIN_BET = 35_000
-GAME_TIMEOUT = 600
-
-# ── Transfer ──
-TRANSFER_FEE = 0.10
-TRANSFER_DAILY_LIMIT = 10
-
-# ── Miner ──
-MINER_BUY_COST = 5_000_000
-MINER_LEVELS = {
-    1: {"ton": 0.01, "usdt": 0.03, "upgrade": 20_000_000},
-    2: {"ton": 0.03, "usdt": 0.05, "upgrade": 100_000_000},
-    3: {"ton": 0.04, "usdt": 0.07, "upgrade": 300_000_000},
-    4: {"ton": 0.06, "usdt": 0.09, "upgrade": 500_000_000},
-    5: {"ton": 0.09, "usdt": 0.12, "upgrade": 0},
+DEFAULT_PANEL_PRICES = {
+    "snai_500gb": 400000,
+    "snai_800gb": 600000,
+    "snai_1tb": 1000000,
 }
-MINER_ELECTRICITY_COST = 2_000_000
 
-# ── Currency Conversion ──
-TON_TO_DP = 100_000
-USDT_TO_DP = 50_000
-TON_CONVERT_MIN = 0.7
-USDT_CONVERT_MIN = 2.0
+DEFAULT_GIFT_TEDDY_PRICE = 750000
+DEFAULT_STARS_PRICE = 1000000
+STARS_AMOUNT = 50
+LIKE_CHALLENGE_COST = 30000
 
-# ── Stars ──
-STARS_DP_COST = 1_000_000
+DEFAULT_REFERRAL_REWARD = 30000
+REFERRAL_REWARD = 30000
+FIRST_JOIN_REWARD = 50000
 
-# ── Referral ──
-DEFAULT_REFERRAL_REWARD = 50_000
-DEFAULT_FIRST_JOIN_REWARD = 50_000
+# بانک: سود 15%
+BANK_OPEN_COST = 20000
+BANK_INTEREST_RATE = 0.15
+BANK_INTEREST_PERIOD = 86400
 
-# ── Like Challenge ──
-LIKE_CHALLENGE_COST = 30_000
-LIKE_CHALLENGE_DAYS = 7
+# کارخونه
+FACTORY_OPEN_COST = 100000
+FACTORY_HOURLY_MAINTENANCE = 80
+FACTORY_LEVELS = {
+    1: {"mine_per_min": 10, "upgrade_cost": 50000},
+    2: {"mine_per_min": 25, "upgrade_cost": 80000},
+    3: {"mine_per_min": 40, "upgrade_cost": 100000},
+    4: {"mine_per_min": 50, "upgrade_cost": 250000},
+    5: {"mine_per_min": 100, "upgrade_cost": 0},
+}
 
-# ── Wheel ──
-WHEEL_FREE_MIN = 5_000
-WHEEL_FREE_MAX = 100_000
-WHEEL_EXTRA_COST = 50_000
-
-# ── Buy DP Defaults ──
-BUY_DP_DEFAULT_AMOUNT = 500_000
-BUY_DP_DEFAULT_PRICE = 50_000
-
-# ── Group ──
+MIN_GAME_AMOUNT = 100
+TRANSFER_FEE = 0.10
 MIN_GROUP_MEMBERS = 30
 
-# ── Messages ──
-BOT_OFF_MESSAGE = "ربات موقتاً از طرف پشتیبانی خاموش شده"
-SECTION_OFF_MESSAGE = "این بخش موقتاً خاموش می‌باشد"
-PANEL_PURCHASE_MESSAGE = "ادمین کانفیگ رو از پنل سنایی بزودی ارسال می‌کند"
+# محدودیت انتقال
+MAX_DAILY_TRANSFERS = 10
 
-# ── Stickers (disabled) ──
-STICKER_WELCOME = ""
-STICKER_WIN = ""
-STICKER_LOSE = ""
+# بازی‌ها
+CRASH_MIN_BET = 500
+CRASH_MAX_BET = 500000
+CRASH_MAX_MULTIPLIER = 15.0
+DICE_MIN_BET = 15000
+GUESS_MIN_BET = 30000
+CASINO_MIN_BET = 25000
+BOMB_MIN_BET = 35000
+BOMB_COUNT = 6
+BOMB_MULTIPLIER_STEP = 0.4
+FOOTBALL_MIN_BET = 50000
 
-# ── Server ──
-PORT = int(os.environ.get("PORT", 8080))
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+# گردونه
+WHEEL_FREE_INTERVAL = 86400
+WHEEL_EXTRA_COST = 50000
+WHEEL_MIN_PRIZE = 5000
+WHEEL_MAX_PRIZE = 100000
+
+# مدت بسته شدن خودکار بازی
+GAME_TIMEOUT = 600
+
+# حداقل زیرمجموعه برای خرید پنل
+MIN_REFERRALS_FOR_PANEL = 5
+
+# ============ MINER ============
+MINER_BUY_COST = 5_000_000
+MINER_LEVELS = {
+    1: {"ton_per_hour": 0.01, "usdt_per_hour": 0.03, "upgrade_cost": 20_000_000},
+    2: {"ton_per_hour": 0.03, "usdt_per_hour": 0.05, "upgrade_cost": 100_000_000},
+    3: {"ton_per_hour": 0.04, "usdt_per_hour": 0.07, "upgrade_cost": 300_000_000},
+    4: {"ton_per_hour": 0.06, "usdt_per_hour": 0.09, "upgrade_cost": 500_000_000},
+    5: {"ton_per_hour": 0.09, "usdt_per_hour": 0.12, "upgrade_cost": 0},
+}
+
+MINER_ELECTRICITY_RATE = 2_000_000  # DP برای 1 ساعت
+
+# تبدیل ارز
+TON_TO_DP_RATE = 100_000  # هر 0.01 TON = 100,000 DP
+USDT_TO_DP_RATE = 50_000  # هر 0.01 USDT = 50,000 DP
+MIN_TON_CONVERT = 0.7
+MIN_USDT_CONVERT = 2.0
+
+# سطوح
+LEVEL_REQUIREMENTS = {
+    1: 0, 2: 20000, 3: 40000, 4: 80000, 5: 150000,
+    6: 200000, 7: 300000, 8: 500000, 9: 800000, 10: 1000000,
+    11: 1500000, 12: 1800000, 13: 2000000, 14: 2500000, 15: 3000000,
+    16: 4000000, 17: 6000000, 18: 10000000, 19: 15000000, 20: 20000000,
+}
+
+LEVEL_REWARDS = {
+    2: 2000, 3: 2000, 4: 5000, 5: 6000, 6: 8000, 7: 10000,
+    8: 12000, 9: 15000, 10: 30000, 11: 11000, 12: 12000, 13: 13000,
+    14: 14000, 15: 15000, 16: 16000, 17: 17000, 18: 18000, 19: 19000, 20: 20000,
+}
+
+BASE_MIN_DP = 100
+BASE_MAX_DP = 250
+DP_INCREASE_PER_LEVEL = 40
+MIN_COOLDOWN = 180
+MAX_COOLDOWN = 300
+
+LEVEL_TITLES = {
+    1: "🌑 تاریکی‌نشین", 2: "🌒 سایه‌پرداز", 3: "🌓 شب‌گرد",
+    4: "🌔 ماه‌جو", 5: "🌕 ستاره‌شناس", 6: "⭐ فرمانده تاریکی",
+    7: "🌟 شوالیه سایه", 8: "💫 لرد تاریکی", 9: "✨ شاهزاده سایه‌ها",
+    10: "🥈 نقره‌ای", 11: "🥇 طلایی", 12: "💎 الماسی",
+    13: "👑 پادشاه تاریکی", 14: "🏆 افسانه‌ای", 15: "🔮 جادوگر سایه",
+    16: "🐉 اژدهای تاریک", 17: "⚡ رعد تاریکی", 18: "🌪 طوفان سایه",
+    19: "🔥 آتشین تاریک", 20: "🏴 امپراتور تاریکی",
+}
+
+BUY_DP_AMOUNT = 500000
+BUY_DP_PRICE_TOMAN = 50000
