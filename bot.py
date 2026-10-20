@@ -5922,8 +5922,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     await asyncio.sleep(1)
 
                     # ری‌لود دیتابیس
-                    global db
-                    db = database.Database()
+                    db.__init__()
 
                     final_stats = db.get_stats()
 
@@ -5957,7 +5956,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     try:
                         if os.path.exists(safety_backup):
                             shutil.copy2(safety_backup, db.db_name)
-                            db = database.Database()
+                            db.__init__()
                     except Exception:
                         pass
                     await status_msg.edit_text(
